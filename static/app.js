@@ -4,6 +4,7 @@ const statusNames = {online:'Online',degraded:'Kontrol ediliyor',unreachable:'Of
 let state = {devices:[],events:[],settings:{ranges:[],interval:300},scan:{}}, view='overview', editing=null, initialized=false, polling=false;
 let selectedNetwork='';
 let sessionTarget=null;
+let editingProfile=null, observedHostKey='',profileTesting=false;
 let token=sessionStorage.getItem('atlas-token')||'';
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date = value => value ? new Date(value).toLocaleString('tr-TR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—';
@@ -24,11 +25,11 @@ async function api(path, options={}) {
 function notice(message,error=false){const el=$('#notice');el.textContent=message;el.classList.toggle('error',error);el.hidden=false;}
 function setView(next){
   view=next;
-  const titles={overview:['Ağınıza yakından bakın.','Cihaz keşfi, envanter ve uzaktan yönetim.','Genel bakış'],inventory:['Cihaz envanteri','IP, MAC, marka, model ve erişim bilgileri.','Cihaz envanteri'],topology:['Ağ topolojisi','LLDP ile okunan gerçek cihaz ve port bağlantıları.','Ağ topolojisi'],events:['Ağınızda neler oluyor?','Keşifleri ve erişilebilirlik değişikliklerini takip edin.','Olay geçmişi'],settings:['Ağlarınızı bağlayın.','Keşfedilecek ağları ve düzenli kontrol aralığını belirleyin.','Ağ ayarları']};
+  const titles={overview:['Ağınıza yakından bakın.','Cihaz keşfi, envanter ve uzaktan yönetim.','Genel bakış'],inventory:['Cihaz envanteri','IP, MAC, marka, model ve erişim bilgileri.','Cihaz envanteri'],profiles:['Cihazdan gerçek veriyi okuyun.','Windows, Linux ve ağ cihazları için yetkili bağlantı profilleri.','Bağlantı profilleri'],topology:['Ağ topolojisi','LLDP ile okunan gerçek cihaz ve port bağlantıları.','Ağ topolojisi'],events:['Ağınızda neler oluyor?','Keşifleri ve erişilebilirlik değişikliklerini takip edin.','Olay geçmişi'],settings:['Ağlarınızı bağlayın.','Keşfedilecek ağları ve düzenli kontrol aralığını belirleyin.','Ağ ayarları']};
   const [title,description,crumb]=titles[next];
   $('#page-title').textContent=title;$('#page-description').textContent=description;$('#breadcrumb').textContent=crumb;
   for(const el of document.querySelectorAll('.nav-item')) el.classList.toggle('active',el.dataset.view===next);
-  for(const name of ['overview','events','settings','topology']) $('#'+name+'-view').hidden=next!==name;
+  for(const name of ['overview','events','settings','topology','profiles']) $('#'+name+'-view').hidden=next!==name;
   $('#inventory-section').hidden=!['overview','inventory'].includes(next);
   if(next==='topology')renderTopology();
 }
@@ -37,7 +38,7 @@ function activity(events){
   return events.map(e=>`<div class="activity ${esc(e.level)}"><span class="activity-icon">${e.level==='warning'?'!':e.level==='success'?'↗':'＋'}</span><div><div class="activity-message">${esc(e.message)}</div><small class="ip">${esc(e.ip)}</small></div><time>${esc(date(e.created_at))}</time></div>`).join('');
 }
 function render(){
-  const devices=state.devices, total=devices.length, online=devices.filter(d=>d.effective_status==='online').length, unknown=devices.filter(d=>['unknown','stale','observed'].includes(d.effective_status)).length, issues=total-online-unknown;
+  const devices=state.devices, total=devices.length, online=devices.filter(d=>d.effective_status==='online').length, issues=devices.filter(d=>['degraded','unreachable'].includes(d.effective_status)||(d.collector_status==='ok'&&d.analysis?.length&&d.metrics_success_at&&Date.now()-new Date(d.metrics_success_at).getTime()<(state.settings.interval*2+60)*1000)).length;
   for(const [id,value] of Object.entries({total,online,issues,networks:state.settings.ranges.length,'device-count':total})) $('#'+id).textContent=value;
   $('#interval-label').textContent=(state.settings.interval/60)+' dakikada bir kontrol';
   $('#all-events').innerHTML=activity(state.events);
@@ -59,6 +60,7 @@ function render(){
   if(selectedNetwork && !(state.groups||[]).some(g=>g.network===selectedNetwork)) selectedNetwork='';
   renderGroups();
   renderRows();
+  renderProfiles();
   if(view==='topology')renderTopology();
 }
 function renderGroups(){
@@ -74,7 +76,7 @@ function renderRows(){
   const search=$('#search').value.toLocaleLowerCase('tr-TR'), status=$('#status-filter').value, kind=$('#kind-filter').value;
   const devices=state.devices.filter(d=>(!selectedNetwork||d.network===selectedNetwork)&&(!status||d.effective_status===status)&&(!kind||d.kind===kind)&&(!search||[d.display_name,d.ip,d.site,d.owner,d.os,d.display_model,d.manufacturer,d.mac_vendor,...(d.mac_addresses||[])].join(' ').toLocaleLowerCase('tr-TR').includes(search)));
   const groups=[...new Set(devices.map(d=>d.network))];
-  $('#device-rows').innerHTML=groups.map(group=>`<tr class="network-row"><td colspan="8"><strong class="ip">${esc(group)}</strong><span>${devices.filter(d=>d.network===group).length} cihaz</span></td></tr>`+devices.filter(d=>d.network===group).map(d=>`<tr class="device-row"><td><span class="device-icon">${d.kind==='Sunucu'?'▤':d.kind==='Yazıcı'?'▣':'⌘'}</span><div><strong>${esc(d.display_name)}</strong><small>${esc(d.kind)}${d.site?' · '+esc(d.site):''}</small></div></td><td class="ip">${esc(d.ip)}</td><td class="mac-cell"><strong class="ip">${esc((d.mac_addresses||[]).join(', ')||'Okunamadı')}</strong><small title="${esc(d.mac_note||'')}">${esc((d.mac_addresses||[]).length?d.mac_source:d.mac_status==='routed'?'Uzak ağ / VLAN':'ARP yanıtı yok')}</small></td><td><strong>${esc(d.manufacturer||(d.mac_vendor?'MAC kayıt sahibi: '+d.mac_vendor:'Marka bilinmiyor'))} · ${esc(d.display_model||'Model bilinmiyor')}</strong><small>${esc(d.mac_source||d.display_model_source||snmpStatus(d.snmp_status))}</small></td><td><span class="badge ${esc(d.effective_status)}">${esc(statusNames[d.effective_status])}</span></td><td>${esc(date(d.last_checked))}</td><td class="access-buttons">${accessButtons(d)}</td><td><button class="row-edit" data-edit="${d.id}" aria-label="${esc(d.ip)} cihazını düzenle">Bilgiler ↗</button></td></tr>`).join('')).join('');
+  $('#device-rows').innerHTML=groups.map(group=>`<tr class="network-row"><td colspan="8"><strong class="ip">${esc(group)}</strong><span>${devices.filter(d=>d.network===group).length} cihaz</span></td></tr>`+devices.filter(d=>d.network===group).map(d=>`<tr class="device-row"><td><span class="device-icon">${d.kind==='Sunucu'?'▤':d.kind==='Yazıcı'?'▣':'⌘'}</span><div><strong>${esc(d.display_name)}</strong><small>${esc(d.kind)}${d.site?' · '+esc(d.site):''}</small></div></td><td class="ip">${esc(d.ip)}</td><td class="mac-cell"><strong class="ip">${esc((d.mac_addresses||[]).join(', ')||'Okunamadı')}</strong><small title="${esc(d.mac_note||'')}">${esc((d.mac_addresses||[]).length?d.mac_source:d.mac_status==='routed'?'Uzak ağ / VLAN':'ARP yanıtı yok')}</small></td><td><strong>${esc(d.manufacturer||(d.mac_vendor?'MAC kayıt sahibi: '+d.mac_vendor:'Marka bilinmiyor'))} · ${esc(d.display_model||'Model bilinmiyor')}</strong><small>${esc(d.display_model_source||snmpStatus(d.snmp_status))}</small><small>CPU ${percent(d.metrics?.cpu_percent)} · RAM ${percent(d.metrics?.memory_percent)}</small></td><td><span class="badge ${esc(d.effective_status)}">${esc(statusNames[d.effective_status])}</span></td><td>${esc(date(d.last_checked))}</td><td class="access-buttons">${accessButtons(d)}</td><td><button class="row-edit" data-edit="${d.id}" aria-label="${esc(d.ip)} cihazını düzenle">Bilgiler ↗</button></td></tr>`).join('')).join('');
   $('#empty').hidden=devices.length>0;
   $('#empty h3').textContent=state.devices.length?'Filtrelere uygun cihaz bulunamadı.':'Ağınızın haritası burada başlıyor.';
   $('#empty p').textContent=state.devices.length?'Aramayı veya filtreleri değiştirebilirsiniz.':'Ağ ayarlarından IP aralığınızı kaydedin ve ilk taramayı başlatın. Cihazları envantere elle de ekleyebilirsiniz.';
@@ -99,10 +101,12 @@ async function editDevice(id=null){
   $('#history').textContent='Yükleniyor…';
   $('#device-dialog').showModal();
   if(d){
-    $('#identity-details').innerHTML=`<h3>Otomatik cihaz bilgileri</h3><dl><dt>Model</dt><dd>${esc(d.detected_model||'Tespit edilemedi')}</dd><dt>Kaynak</dt><dd>${esc(d.model_source||snmpStatus(d.snmp_status))}</dd><dt>Üretici / Seri</dt><dd>${esc(d.manufacturer||'—')} / ${esc(d.display_serial||'—')}</dd><dt>SNMP agent süresi</dt><dd>${d.agent_uptime===null?'—':Math.floor(d.agent_uptime/86400)+' gün '+Math.floor(d.agent_uptime%86400/3600)+' saat'}</dd><dt>Son SNMP yanıtı</dt><dd>${esc(date(d.snmp_checked_at))}</dd><dt>MAC adresi</dt><dd>${esc((d.mac_addresses||[]).join(', ')||d.mac_note||'Okunamadı')}</dd><dt>MAC kaynağı / zaman</dt><dd>${esc(d.mac_source||'—')} · ${esc(date(d.mac_checked_at))}</dd><dt>SNMP durumu</dt><dd>${esc(d.snmp_status==='ok'?'Yanıt verdi':snmpStatus(d.snmp_status))}</dd></dl><p>${esc(d.sys_description||'Cihaz açıklaması alınamadı.')}</p><p class="help">Sağlık göstergesi erişilebilirliği ifade eder; CPU, disk veya sıcaklık ölçümü değildir.</p>`;
-    $('#network-details').innerHTML=`<h3>Arayüzler · ${esc(d.interfaces?.length||0)}</h3><div class="table-scroll"><table><thead><tr><th>ARAYÜZ</th><th>MAC</th><th>PORT DURUMU</th></tr></thead><tbody>${(d.interfaces||[]).map(i=>`<tr><td>${esc(i.name)}</td><td class="ip">${esc(i.mac||'—')}</td><td>${i.oper_status===1?'Up':i.oper_status===2?'Down':'Bilinmiyor'}</td></tr>`).join('')}</tbody></table></div><p class="help">LLDP: ${esc(d.lldp_status==='read'?'Okundu':d.lldp_status==='partial'?'Kısmi veri':'Okunamadı')} · Son okuma: ${esc(date(d.network_checked_at))}. Arayüz MAC’leri yönetim IP’sinin MAC’i ile aynı olmayabilir.</p>`;
+    $('#metrics-details').innerHTML=metricsView(d);
+    $('#identity-details').innerHTML=`<h3>Otomatik cihaz bilgileri</h3><dl><dt>Model</dt><dd>${esc(d.detected_model||'Tespit edilemedi')}</dd><dt>Kaynak</dt><dd>${esc(d.model_source||snmpStatus(d.snmp_status))}</dd><dt>Üretici / Seri</dt><dd>${esc(d.manufacturer||'—')} / ${esc(d.display_serial||'—')}</dd><dt>SNMP agent süresi</dt><dd>${d.agent_uptime===null?'—':Math.floor(d.agent_uptime/86400)+' gün '+Math.floor(d.agent_uptime%86400/3600)+' saat'}</dd><dt>Son SNMP yanıtı</dt><dd>${esc(date(d.snmp_checked_at))}</dd><dt>MAC adresi</dt><dd>${esc((d.mac_addresses||[]).join(', ')||d.mac_note||'Okunamadı')}</dd><dt>MAC kaynağı / zaman</dt><dd>${esc(d.mac_source||'—')} · ${esc(date(d.mac_checked_at))}</dd><dt>SNMP durumu</dt><dd>${esc(d.snmp_status==='ok'?'Yanıt verdi':snmpStatus(d.snmp_status))}</dd></dl><p>${esc(d.sys_description||'Cihaz açıklaması alınamadı.')}</p><p class="help">Yetkili profille okunan yük verileri aşağıda gösterilir; alınamayan ölçümler boş bırakılır.</p>`;
+    $('#network-details').innerHTML=`<h3>Arayüzler · ${esc(d.interfaces?.length||0)}</h3><div class="table-scroll"><table><thead><tr><th>ARAYÜZ</th><th>MAC / IP</th><th>PORT DURUMU</th></tr></thead><tbody>${(d.interfaces||[]).map(i=>`<tr><td>${esc(i.name)}</td><td class="ip">${esc(i.mac||'—')}<small>${esc((i.addresses||[]).join(', '))}</small></td><td>${i.oper_status===1?'Up':i.oper_status===2?'Down':'Bilinmiyor'}</td></tr>`).join('')}</tbody></table></div><p class="help">LLDP: ${esc(d.lldp_status==='read'?'Okundu':d.lldp_status==='partial'?'Kısmi veri':'Okunamadı')} · Son okuma: ${esc(date(d.network_checked_at))}. Arayüz MAC’leri yönetim IP’sinin MAC’i ile aynı olmayabilir.</p>`;
     $('#port-details').textContent='Son kontrolde açık portlar: '+(d.ports.map(p=>p+' / '+(state.capabilities.ports[p]||'TCP')).join(', ')||'Yok')+' · İlk kayıt: '+date(d.first_seen)+' · Son yanıt: '+date(d.last_seen);
     try{const rows=await (await api(`/api/devices/${id}/history`)).json();if(editing!==id)return;$('#history').innerHTML=rows.length?rows.reverse().map(r=>`<i class="${r.reachable?'':'fail'}" title="${esc(date(r.checked_at))} · ${r.reachable?'Yanıt verdi':'Yanıt yok'}${r.latency===null?'':' · '+esc(r.latency)+' ms'}"></i>`).join(''):'Henüz kontrol yapılmadı.';}catch(e){$('#history').textContent=e.message;}
+    try{const rows=await(await api(`/api/devices/${id}/measurements`)).json();if(editing===id&&$('#load-history'))$('#load-history').innerHTML=loadHistory(rows);}catch{}
   }
 }
 document.addEventListener('click',event=>{
@@ -111,6 +115,8 @@ document.addEventListener('click',event=>{
   const edit=event.target.closest('[data-edit]');if(edit)editDevice(Number(edit.dataset.edit));
   const group=event.target.closest('[data-network]');if(group){selectedNetwork=selectedNetwork===group.dataset.network?'':group.dataset.network;renderGroups();renderRows();}
   const connect=event.target.closest('[data-connect]');if(connect)openSession(Number(connect.dataset.device),connect.dataset.connect);
+  const profile=event.target.closest('[data-profile-edit]');if(profile)editProfile(Number(profile.dataset.profileEdit));
+  const test=event.target.closest('[data-profile-test]');if(test)testProfile(Number(test.dataset.profileTest));
 });
 $('#all-networks').addEventListener('click',()=>{selectedNetwork='';renderGroups();renderRows();});
 for(const id of ['search','status-filter','kind-filter']) $('#'+id).addEventListener('input',renderRows);
@@ -218,3 +224,54 @@ $('#topology-svg').addEventListener('click',()=>{const svg=$('#topology-canvas s
 document.addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('.topology-node[data-edit]'))editDevice(Number(event.target.dataset.edit));});
 
 $('#vendors-update').addEventListener('click',async()=>{const button=$('#vendors-update');button.disabled=true;notice('IEEE üretici listesi indiriliyor…');try{const data=await(await api('/api/vendors/update',{method:'POST',body:'{}'})).json();notice(data.prefixes+' üretici kaydı alındı.');await refresh();}catch(e){notice(e.message,true);}finally{button.disabled=false;}});
+
+function percent(value){return typeof value==='number'?value.toFixed(1)+'%':'Ölçülmedi';}
+function rate(value){return typeof value==='number'?(value/1000000).toFixed(2)+' Mbps':'İlk / eksik örnek';}
+function metricsView(d){
+ const m=d.metrics||{},fresh=d.metrics_success_at&&(Date.now()-new Date(d.metrics_success_at).getTime())<(state.settings.interval*2+60)*1000;
+ return `<h3>Yük ve performans</h3><p class="help">${esc(m.source||'Toplayıcı profili ayarlanmamış')} · Son başarılı okuma: ${esc(date(d.metrics_success_at))}${fresh?'':' · Güncel ölçüm yok'}</p>${d.collector_error?'<p class="form-error">'+esc(d.collector_error)+'</p>':''}<div class="metric-cards"><div>CPU<strong>${percent(m.cpu_percent)}</strong></div><div>RAM<strong>${percent(m.memory_percent)}</strong></div><div>Bellek kapasitesi<strong>${m.memory_total_bytes?(m.memory_total_bytes>=1024**3?(m.memory_total_bytes/1024**3).toFixed(1)+' GB':(m.memory_total_bytes/1024**2).toFixed(0)+' MB'):'Ölçülmedi'}</strong></div></div><p class="help">${esc(d.display_os||'İşletim sistemi okunmadı')} · ${esc(d.display_cpu||'İşlemci okunmadı')}</p><div id="load-history" class="load-history"></div>${(d.analysis||[]).map(i=>'<p class="sensor-warning">'+esc(i.message)+(fresh?'':' · eski ölçüm')+'</p>').join('')}<div class="table-scroll"><table><thead><tr><th>DİSK</th><th>DOLULUK</th></tr></thead><tbody>${(m.disks||[]).map(v=>`<tr><td>${esc(v.name)}</td><td>${percent(v.used_percent)}</td></tr>`).join('')}</tbody></table></div><div class="table-scroll"><table><thead><tr><th>AĞ ARAYÜZÜ</th><th>ALIM</th><th>GÖNDERİM</th></tr></thead><tbody>${[...(m.network||[]),...(m.interfaces||[]).filter(v=>v.rx_bps!==undefined)].map(v=>`<tr><td>${esc(v.name)}</td><td>${rate(v.rx_bps)}</td><td>${rate(v.tx_bps)}</td></tr>`).join('')}</tbody></table></div><p class="help">SNMP hızları iki başarılı sayaç okumasından sonra hesaplanır. Ölçülmeyen alanlar cihazın sağlıklı olduğu anlamına gelmez. Paket kaybı ölçümü yerine mevcut erişilebilirlik kontrolleri kullanılır.</p>`;
+}
+function loadHistory(rows){
+ if(!rows.length)return '<p class="help">Henüz yük ölçümü yok.</p>';
+ return '<p class="help">Son '+rows.length+' CPU ölçümü · soldan sağa zaman</p><div class="load-bars">'+rows.slice().reverse().map(r=>`<span title="${esc(date(r.measured_at)+' · CPU '+percent(r.cpu_percent))}" class="${r.cpu_percent>=90?'high':''}">${typeof r.cpu_percent==='number'?'<svg viewBox="0 0 8 100" width="8" height="54" aria-hidden="true"><rect x="0" y="'+(100-Math.max(2,r.cpu_percent))+'" width="8" height="'+Math.max(2,r.cpu_percent)+'"/></svg>':'·'}</span>`).join('')+'</div>';
+}
+function renderProfiles(){
+ if(profileTesting)return;
+ const profiles=state.profiles||[];
+ const inputs=new Map([...document.querySelectorAll('[data-test-target]')].map(el=>[Number(el.dataset.testTarget),el.value]));
+ // Do not replace a target while the operator is typing in it.
+ if(document.activeElement?.matches('[data-test-target]'))return;
+ $('#profile-rows').innerHTML=profiles.length?profiles.map(p=>`<tr><td><strong>${esc(p.name)}</strong><small>${esc({windows:'Windows WMI/CIM',linux:'Linux SSH',snmp:'SNMP'}[p.kind])}</small><small>${esc(p.last_result||'Henüz test edilmedi')}</small></td><td class="ip">${esc(p.scope)}</td><td>${p.enabled?'Açık':'Kapalı / duraklatıldı'}</td><td><input class="test-target" data-test-target="${p.id}" placeholder="Tek cihaz IP’si" value="${esc(inputs.get(p.id)||(p.scope.endsWith('/32')?p.scope.split('/')[0]:''))}"></td><td><button class="button" data-profile-test="${p.id}">Test et</button> <button class="text-button" data-profile-edit="${p.id}">Düzenle</button></td></tr>`).join(''):'<tr><td colspan="5">Profil ekleyerek bir Windows, Linux veya switch cihazında gerçek model ve yük okumasını test edin.</td></tr>';
+}
+function profileKind(){
+ const kind=$('#profile-kind').value,current=$('#profile-current').checked;
+ $('#profile-windows').hidden=kind!=='windows';$('#profile-linux').hidden=kind!=='linux';$('#profile-snmp').hidden=kind!=='snmp';$('#profile-login').hidden=kind==='snmp'||(kind==='windows'&&current);
+}
+function editProfile(id=null){
+ editingProfile=id;observedHostKey='';$('#profile-form').reset();$('#profile-error').textContent='';$('#profile-key-result').textContent='';$('#profile-delete').hidden=id===null;
+ const p=(state.profiles||[]).find(p=>p.id===id);
+ if(p){for(const [key,el] of Object.entries({name:'profile-name',kind:'profile-kind',scope:'profile-scope',username:'profile-user',port:'profile-port',version:'profile-version',host_key:'profile-host-key'}))$('#'+el).value=p[key];$('#profile-current').checked=p.use_current_user;$('#profile-enabled').checked=p.enabled;}
+ else{$('#profile-port').value='22';$('#profile-version').value='2c';}
+ profileKind();$('#profile-dialog').showModal();
+}
+$('#profile-add').addEventListener('click',()=>editProfile());$('#profile-kind').addEventListener('change',profileKind);$('#profile-current').addEventListener('change',profileKind);
+$('#profile-form').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const data={name:$('#profile-name').value,kind:$('#profile-kind').value,scope:$('#profile-scope').value,username:$('#profile-user').value,port:Number($('#profile-port').value)||22,version:$('#profile-version').value,use_current_user:$('#profile-current').checked,enabled:$('#profile-enabled').checked,host_key:$('#profile-host-key').value,password:$('#profile-password').value,private_key:$('#profile-private-key').value,key_passphrase:$('#profile-key-passphrase').value,community:$('#profile-community').value};
+ try{await api(editingProfile===null?'/api/profiles':`/api/profiles/${editingProfile}`,{method:editingProfile===null?'POST':'PUT',body:JSON.stringify(data)});$('#profile-dialog').close();notice('Profil kaydedildi. Önce tek cihazda Test et seçeneğini kullanın.');await refresh();}catch(e){$('#profile-error').textContent=e.message;}
+ finally{for(const id of ['profile-password','profile-private-key','profile-key-passphrase','profile-community'])$('#'+id).value='';}
+});
+$('#profile-dialog').addEventListener('close',()=>{for(const id of ['profile-password','profile-private-key','profile-key-passphrase','profile-community'])$('#'+id).value='';});
+$('#profile-delete').addEventListener('click',async()=>{if(editingProfile===null||!confirm('Bu bağlantı profili silinsin mi? Envanter ve ölçüm geçmişi korunur.'))return;try{await api(`/api/profiles/${editingProfile}`,{method:'DELETE'});$('#profile-dialog').close();await refresh();}catch(e){$('#profile-error').textContent=e.message;}});
+$('#profile-key-read').addEventListener('click',async()=>{
+ const target=$('#profile-scope').value.split('/')[0];$('#profile-key-result').textContent='Sunucunun açık anahtarı okunuyor…';
+ try{const data=await(await api('/api/ssh-key',{method:'POST',body:JSON.stringify({target,port:Number($('#profile-port').value)||22})})).json();if(!data.ok)throw new Error(data.error);observedHostKey=data.fingerprint;$('#profile-key-confirm').checked=false;$('#profile-key-result').textContent=data.key_type+' · '+data.fingerprint+' · Bu değer henüz doğrulanmadı.';}catch(e){$('#profile-key-result').textContent=e.message;}
+});
+$('#profile-key-confirm').addEventListener('change',()=>{if($('#profile-key-confirm').checked&&observedHostKey)$('#profile-host-key').value=observedHostKey;});
+async function testProfile(id){
+ if(profileTesting)return;
+ const input=document.querySelector(`[data-test-target="${id}"]`),target=input?.value;
+ if(!target){notice('Önce tek bir test cihazının IP adresini girin.',true);return;}
+ profileTesting=true;$('#profile-result').hidden=false;$('#profile-result').textContent=target+' üzerinde yetkili veri okunuyor…';
+ try{const data=await(await api(`/api/profiles/${id}/test`,{method:'POST',body:JSON.stringify({target})})).json();$('#profile-result').textContent=data.ok?`Başarılı · ${data.source} · ${data.name||'Ad okunmadı'} · ${data.manufacturer||''} ${data.model||'Model sunulmadı'} · MAC: ${(data.macs||[]).join(', ')||'Okunmadı'} · CPU: ${percent(data.cpu_percent)} · RAM: ${percent(data.memory_percent)} · ${data.disks?.length||0} disk${data.unavailable?.length?' · '+data.unavailable.join(' '):''}`:data.error;}catch(e){$('#profile-result').textContent=e.message;}finally{profileTesting=false;await refresh();}
+}

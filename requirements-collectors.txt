@@ -1,0 +1,2 @@
+cryptography==50.0.0
+paramiko==4.0.0

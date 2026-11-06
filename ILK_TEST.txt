@@ -1,0 +1,23 @@
+AğAtlas - İlk Windows testi
+
+1. Çalışan uygulamayı kapatın. Eski klasörü ve özellikle data klasörünü yedekleyin.
+2. Yeni program dosyalarını eski klasöre kopyalayın. data klasörünü silmeyin.
+3. TOPLAYICI_KUR.cmd dosyasını bir kez çalıştırın. Ardından BASLAT.cmd ile açın.
+4. Tarayıcıda http://127.0.0.1:8080 adresini açın ve Ctrl+F5 yapın.
+5. Komut isteminde ipconfig yazarak kendi bilgisayarınızın IPv4 adresini bulun.
+6. Bağlantı profilleri > Profil ekle:
+   - Profil adı: Kendi bilgisayarım
+   - Tür: Windows WMI/CIM
+   - Hedef: Kendi bilgisayarınızın IPv4 adresi (ilk testte ağ aralığı girmeyin).
+   - Mevcut Windows hesabımı kullan: İşaretli.
+   - Otomatik taramalarda kullan: Şimdilik kapalı.
+7. Profili kaydedin ve o profilin satırındaki Test et düğmesine basın.
+8. Sonuçta model, MAC, CPU ve RAM alanlarını kontrol edin. Cihazın Bilgiler
+   ekranında disk ve arayüz ölçümlerini de görebilirsiniz.
+
+Bu yerel testte SNMP community veya Windows parolası girmeniz gerekmez.
+Başarılı olursa Linux SSH ve switch SNMP profillerine geçin. Başarısız olursa
+yalnızca ekrandaki sonuç/hata metnini paylaşın; parola veya özel anahtar paylaşmayın.
+
+Linux/switch yönergeleri ve Windows sunucuya taşıma ayrıntıları README.md içindedir.
+Gerçek Windows okuması bu geliştirme ortamında denenemedi; ilk kabul testi budur.

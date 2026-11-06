@@ -24,10 +24,12 @@ from snmp import identify
 from discovery import inspect_network, local_neighbors, mac_address, topology, windows_arp
 from gateway import session_url
 import vendors
+from profiles import Profiles
+import collectors
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
-PORTS = {22: 'SSH', 80: 'HTTP', 443: 'HTTPS / Aruba / VMware', 445: 'SMB', 3389: 'RDP', 5900: 'VNC', 5901: 'VNC :1', 5902: 'VNC :2', 902: 'VMware', 8006: 'Proxmox', 9100: 'Yazıcı', 631: 'IPP', 515: 'LPD', 8080: 'HTTP alternatif'}
+PORTS = {22: 'SSH', 80: 'HTTP', 135: 'Windows RPC / WMI', 443: 'HTTPS / Aruba / VMware', 445: 'SMB', 3389: 'RDP', 5985: 'WinRM', 5986: 'WinRM HTTPS', 5900: 'VNC', 5901: 'VNC :1', 5902: 'VNC :2', 902: 'VMware', 8006: 'Proxmox', 9100: 'Yazıcı', 631: 'IPP', 515: 'LPD', 8080: 'HTTP alternatif'}
 FIELDS = ('name', 'kind', 'os', 'cpu', 'ram', 'model', 'serial', 'site', 'owner', 'notes', 'ssh_user')
 IDENTITY_COLUMNS = {'detected_model': "TEXT NOT NULL DEFAULT ''", 'detected_serial': "TEXT NOT NULL DEFAULT ''",
                     'detected_name': "TEXT NOT NULL DEFAULT ''", 'manufacturer': "TEXT NOT NULL DEFAULT ''",
@@ -40,11 +42,57 @@ IDENTITY_COLUMNS = {'detected_model': "TEXT NOT NULL DEFAULT ''", 'detected_seri
                     'chassis_id': "TEXT NOT NULL DEFAULT ''", 'network_checked_at': 'TEXT',
                     'network_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'lldp_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'lldp_checked_at': 'TEXT',
                     'forwarding': "TEXT NOT NULL DEFAULT '[]'", 'forwarding_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'forwarding_checked_at': 'TEXT',
-                    'mac_status': "TEXT NOT NULL DEFAULT 'unknown'"}
+                    'mac_status': "TEXT NOT NULL DEFAULT 'unknown'", 'collected_os': "TEXT NOT NULL DEFAULT ''",
+                    'collected_cpu': "TEXT NOT NULL DEFAULT ''", 'collected_ram': "TEXT NOT NULL DEFAULT ''",
+                    'metrics': "TEXT NOT NULL DEFAULT '{}'", 'metrics_checked_at': 'TEXT', 'metrics_success_at': 'TEXT',
+                    'collector_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'collector_error': "TEXT NOT NULL DEFAULT ''"}
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def analyze_metrics(data):
+    issues=[]
+    for key,label in [('cpu_percent','CPU'),('memory_percent','RAM')]:
+        value=data.get(key)
+        if isinstance(value,(int,float)) and value>=90:
+            issues.append({'code':key,'message':f'{label} kullanımı yüksek: %{value:g}'})
+    for disk in data.get('disks',[]):
+        if disk.get('used_percent',0)>=90:
+            issues.append({'code':'disk:'+disk['name'],'message':f"Disk doluluğu yüksek: {disk['name']} %{disk['used_percent']:g}"})
+    for interface in data.get('network',[])+data.get('interfaces',[]):
+        if interface.get('new_errors',0)>0:
+            issues.append({'code':'errors:'+interface['name'],'message':f"Arayüzde yeni paket hatası: {interface['name']}"})
+        speed=interface.get('speed_bps')
+        if speed and max(interface.get('rx_bps') or 0,interface.get('tx_bps') or 0)>=speed*.9:
+            issues.append({'code':'bandwidth:'+interface['name'],'message':f"Arayüz kapasiteye yakın: {interface['name']}"})
+    return issues
+
+
+def counter_rates(metrics,previous):
+    epoch=time.time();metrics['sample_epoch']=epoch
+    elapsed=epoch-previous.get('sample_epoch',epoch)
+    old={str(v.get('index',v.get('name'))):v for v in previous.get('network',[])}
+    for row in metrics.get('network',[]):
+        before=old.get(str(row.get('index',row.get('name'))))
+        if not before or elapsed<=0 or 'counter_rx' not in row:
+            continue
+        reset=(metrics.get('uptime_ticks',0)<previous.get('uptime_ticks',0) or
+               row.get('counter_discontinuity')!=before.get('counter_discontinuity'))
+        for key,direction in [('counter_rx','rx_bps'),('counter_tx','tx_bps')]:
+            value,prior=row.get(key),before.get(key)
+            if reset or value is None or prior is None or value<prior:
+                row['counter_reset']=True
+                continue
+            rate=round((value-prior)*8/elapsed,1)
+            if row.get('speed_bps') and rate>row['speed_bps']*1.2:
+                row['counter_reset']=True
+                continue
+            row[direction]=rate
+        errors,prior=row.get('counter_errors'),before.get('counter_errors')
+        if not reset and errors is not None and prior is not None and errors>=prior:
+            row['new_errors']=errors-prior
 
 
 def network(value):
@@ -128,6 +176,9 @@ class Store:
                     ip TEXT NOT NULL, message TEXT NOT NULL, level TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS measurements(id INTEGER PRIMARY KEY,device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                    profile_id INTEGER,measured_at TEXT NOT NULL,data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS measurements_device ON measurements(device_id,id);
             ''')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)', ('monitor', json.dumps({'ranges': [], 'interval': 300})))
             columns = {row['name'] for row in db.execute('PRAGMA table_info(devices)')}
@@ -137,6 +188,7 @@ class Store:
             db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)', ('snmp', json.dumps({'enabled': False, 'version': '2c', 'community': ''})))
         if os.name != 'nt':
             os.chmod(self.path, 0o600)
+        self.profiles = Profiles(self)
 
     @contextmanager
     def db(self):
@@ -162,6 +214,11 @@ class Store:
             for field in ('mac_addresses', 'interfaces', 'lldp_neighbors', 'forwarding'):
                 row[field] = json.loads(row[field])
             row['mac_vendor'] = vendors.lookup(row['mac_addresses'], vendor_registry['prefixes'])
+            row['metrics'] = json.loads(row['metrics'])
+            row['analysis'] = analyze_metrics(row['metrics'])
+            row['display_os'] = row['os'] or row['collected_os']
+            row['display_cpu'] = row['cpu'] or row['collected_cpu']
+            row['display_ram'] = row['ram'] or row['collected_ram']
             row['mac_note'] = ('Farklı ağ/VLAN: uzak cihazın MAC adresi yönlendirme üzerinden okunamaz.' if row['mac_status'] == 'routed'
                                else 'Yerel ARP yanıtında MAC bulunamadı.' if row['mac_status'] == 'local'
                                else 'MAC henüz okunamadı; yerel ağ bağlantısını kontrol edin.')
@@ -176,6 +233,47 @@ class Store:
                 if age > settings['interval'] * 2 + 60:
                     row['effective_status'] = 'stale'
         return sorted(rows, key=lambda d: ipaddress.ip_address(d['ip']))
+
+    def record_collection(self,ip,result,profile_id=None):
+        stamp=now()
+        with self.db() as db:
+            old=db.execute('SELECT id,metrics FROM devices WHERE ip=?',(ip,)).fetchone()
+            if not old:
+                return
+            if not result.get('ok'):
+                db.execute('UPDATE devices SET collector_status=?,collector_error=?,metrics_checked_at=? WHERE id=?',
+                           (result.get('error_code','error'),result.get('error','Veri okunamadı.'),stamp,old['id']))
+                return
+            metrics=collectors.normalize(result)
+            previous_data=json.loads(old['metrics'])
+            counter_rates(metrics,previous_data)
+            previous={item['code'] for item in analyze_metrics(previous_data)}
+            for issue in analyze_metrics(metrics):
+                if issue['code'] not in previous:
+                    self.event(db,old['id'],ip,issue['message'],'warning')
+            db.execute("UPDATE devices SET metrics=?,collector_status='ok',collector_error='',metrics_checked_at=?,metrics_success_at=? WHERE id=?",
+                       (json.dumps(metrics,ensure_ascii=False),stamp,stamp,old['id']))
+            for field,key in [('detected_name','name'),('detected_model','model'),('detected_serial','serial'),('manufacturer','manufacturer'),('collected_os','os'),('collected_cpu','cpu_name')]:
+                if metrics.get(key):
+                    db.execute(f'UPDATE devices SET {field}=? WHERE id=?',(metrics[key],old['id']))
+            if metrics.get('model'):
+                db.execute('UPDATE devices SET model_source=? WHERE id=?',(metrics.get('inventory_source') or metrics['source'],old['id']))
+            if metrics.get('memory_total_bytes'):
+                size=metrics['memory_total_bytes']
+                capacity=f'{size/1024**3:.1f} GB' if size>=1024**3 else f'{size/1024**2:.0f} MB'
+                db.execute('UPDATE devices SET collected_ram=? WHERE id=?',(capacity,old['id']))
+            if metrics.get('interfaces'):
+                db.execute('UPDATE devices SET interfaces=? WHERE id=?',(json.dumps(metrics['interfaces']),old['id']))
+            if metrics.get('macs'):
+                db.execute('UPDATE devices SET mac_addresses=?,mac_source=?,mac_checked_at=? WHERE id=?',
+                           (json.dumps(metrics['macs']),metrics['source']+' · yetkili envanter',stamp,old['id']))
+            db.execute('INSERT INTO measurements(device_id,profile_id,measured_at,data) VALUES(?,?,?,?)',
+                       (old['id'],profile_id,stamp,json.dumps(metrics,ensure_ascii=False)))
+            db.execute('DELETE FROM measurements WHERE device_id=? AND id NOT IN (SELECT id FROM measurements WHERE device_id=? ORDER BY id DESC LIMIT 500)',(old['id'],old['id']))
+
+    def measurement_history(self,device_id):
+        with self.db() as db:
+            return [{'measured_at':r['measured_at'],**json.loads(r['data'])} for r in db.execute('SELECT * FROM measurements WHERE device_id=? ORDER BY id DESC LIMIT 60',(device_id,))]
 
     def settings(self):
         with self.db() as db:
@@ -410,7 +508,7 @@ class Monitor:
             config = self.store.snmp_settings()
             observations = []
             with ThreadPoolExecutor(max_workers=32) as pool:
-                pending = {pool.submit(self.probe, ip) if self.probe else pool.submit(probe, ip, snmp_config=config) for ip in targets}
+                pending = {pool.submit(self.probe, ip) if self.probe else pool.submit(self.collect_target,ip,config) for ip in targets}
                 for future in as_completed(pending):
                     if self.stop.is_set():
                         for task in pending:
@@ -418,6 +516,8 @@ class Monitor:
                         break
                     result = future.result()
                     self.store.record(result)
+                    if result.get('collection'):
+                        self.store.record_collection(result['ip'],result['collection'],result.get('profile_id'))
                     observations.extend((result.get('network_detail') or {}).get('arp', []))
                     with self.lock:
                         self.state['done'] += 1
@@ -436,6 +536,21 @@ class Monitor:
                 self.state.update(running=False, finished_at=now())
                 self.next_run = time.monotonic() + self.store.settings()['interval']
 
+    def collect_target(self,ip,fallback):
+        snmp_config=self.store.profiles.snmp_config(ip,fallback)
+        result=probe(ip,snmp_config=snmp_config)
+        candidates=self.store.profiles.choose(ip)
+        # Specific scopes take precedence. Never try a series of credentials.
+        profile=next((p for p in candidates if p['kind']=='windows' and 135 in result['ports'] or p['kind']=='linux' and p['port'] in result['ports']),None)
+        if profile:
+            result['collection']=self.store.profiles.read(profile['id'],ip)
+            result['profile_id']=profile['id']
+        elif result.get('snmp',{}).get('status')=='ok':
+            result['collection']=collectors.snmp_load(ip,snmp_config)
+        if result.get('collection',{}).get('ok'):
+            result['reachable']=True
+        return result
+
     def schedule(self):
         while not self.stop.wait(1):
             if not self.snapshot()['running'] and time.monotonic() >= self.next_run:
@@ -450,12 +565,14 @@ class Monitor:
 def csv_export(devices):
     output = io.StringIO(newline='')
     writer = csv.writer(output)
-    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked', 'network', 'display_model', 'display_serial', 'display_model_source', 'snmp_status', 'mac_addresses', 'mac_source', 'mac_checked_at', 'manufacturer', 'mac_vendor')
+    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked', 'network', 'display_model', 'display_serial', 'display_model_source', 'snmp_status', 'mac_addresses', 'mac_source', 'mac_checked_at', 'manufacturer', 'mac_vendor','display_os','display_cpu','display_ram','cpu_percent','memory_percent','metrics_success_at','collector_status')
     writer.writerow(columns)
     for device in devices:
         values = []
         for key in columns:
             value = device.get(key)
+            if key in ('cpu_percent','memory_percent'):
+                value=device.get('metrics',{}).get(key)
             if value is None:
                 value = ''
             if isinstance(value, list):
@@ -540,10 +657,35 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         if self.command == 'GET' and path == '/api/state':
             devices, settings = store.devices(), store.settings()
-            return self.send(200, {'devices': devices, 'topology': topology(devices), 'groups': network_groups(devices, settings['ranges']), 'events': store.events(), 'settings': settings,
+            return self.send(200, {'devices': devices, 'profiles': store.profiles.list(), 'topology': topology(devices), 'groups': network_groups(devices, settings['ranges']), 'events': store.events(), 'settings': settings,
                                    'scan': self.server.monitor.snapshot(), 'capabilities': {'icmp': bool(shutil.which('ping')), 'ports': PORTS, 'browser_access': bool(self.server.gateway_config().get('enabled'))}, 'server_time': now()})
         if self.command == 'GET' and path == '/api/topology':
             return self.send(200, topology(store.devices()))
+        if path == '/api/profiles' and self.command == 'POST':
+            return self.send(201,{'id':store.profiles.save(self.body())})
+        if path == '/api/ssh-key' and self.command == 'POST':
+            data=self.body();target=ip_value(data.get('target',''));port=data.get('port',22)
+            if isinstance(port,bool) or not isinstance(port,int) or not 1<=port<=65535:
+                raise ValueError('SSH portu geçersiz.')
+            return self.send(200,collectors.ssh_key(target,port))
+        if path.startswith('/api/profiles/'):
+            parts=path.strip('/').split('/')
+            if len(parts) not in (3,4) or not parts[2].isdigit():
+                raise LookupError('Profil bulunamadı.')
+            profile_id=int(parts[2])
+            if len(parts)==3 and self.command=='PUT':
+                return self.send(200,{'id':store.profiles.save(self.body(),profile_id)})
+            if len(parts)==3 and self.command=='DELETE':
+                store.profiles.delete(profile_id);return self.send(200,{'ok':True})
+            if len(parts)==4 and parts[3]=='test' and self.command=='POST':
+                target=ip_value(self.body().get('target',''))
+                result=store.profiles.read(profile_id,target,manual=True)
+                if result.get('ok'):
+                    old=next((d for d in store.devices() if d['ip']==target),None)
+                    store.record({'ip':target,'reachable':True,'latency':None,'ports':old['ports'] if old else [],'kind':'Diğer' if store.profiles.get(profile_id)['kind']=='snmp' else 'Sunucu',
+                                  'snmp':result.get('snmp_identity'),'network_detail':result.get('network_detail')})
+                store.record_collection(target,result,profile_id)
+                return self.send(200,result)
         if self.command == 'POST' and path == '/api/vendors/update':
             self.body()
             try:
@@ -577,6 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, content, 'application/octet-stream', filename=filename)
             if self.command == 'GET' and len(parts) == 4 and parts[3] == 'history':
                 return self.send(200, store.history(device_id))
+            if self.command == 'GET' and len(parts) == 4 and parts[3] == 'measurements':
+                return self.send(200,store.measurement_history(device_id))
             if len(parts) == 3:
                 if self.command == 'PUT':
                     return self.send(200, {'id': store.save_device(self.body(), device_id)})

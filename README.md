@@ -1,5 +1,33 @@
 # AğAtlas
 
+## Windows üzerinde gerçek envanter ve yük testi
+
+Bu geliştirme aşamasında merkez **Windows** üzerinde çalışacak şekilde seçilmiştir. Önce bir Windows, bir Linux ve bir switch üzerinde yetkili okumayı doğrulayın; daha sonra profil kapsamını ağ aralığına genişletin. Temel IP/ARP keşfi ve önceki tarayıcı erişimi korunur.
+
+1. Güncellemeden önce uygulamayı durdurun ve klasörü/data/ dizinini yedekleyin. Yeni program dosyalarını mevcut klasöre kopyalayın; data/ dizinini koruyun.
+2. **TOPLAYICI_KUR.cmd** dosyasını bir kez çalıştırın (Python bağımlılıkları: requirements-collectors.txt). Docker bu veri toplama için gerekmez. Ardından **BASLAT.cmd** ile yeniden başlatın ve tarayıcıda Ctrl+F5 yapın.
+3. **Bağlantı profilleri → Profil ekle** seçeneğini kullanın. İlk profilde tek IP girin; **Otomatik taramalarda kullan** seçeneği kapalı kalsın. Kaydettikten sonra **Test et** düğmesine basın.
+
+| Profil | Girilecek bilgiler | Okunabilecek bilgiler |
+| --- | --- | --- |
+| Windows WMI/CIM | Hedef IPv4; kendi bilgisayarınız için **Mevcut Windows hesabımı kullan**. Uzak bilgisayarda yetkili kullanıcı/parola veya yetkili mevcut alan hesabı. | Win32_ComputerSystem/BIOS ile ad, üretici, model ve seri; işlemci, RAM, disk doluluğu, IP etkin arayüzlerin MAC'leri ve sağlanırsa ağ hızı. |
+| Linux SSH | IP, SSH portu, kullanıcı/parola veya özel anahtar; doğrulanmış SHA256 sunucu anahtarı. Hedefte Python 3 ve Linux /proc gereklidir. | DMI bilgileri (okunabiliyorsa), OS, CPU/RAM kullanımı, yerel diskler, arayüz MAC'leri, kısa örneklemden ağ hızları/hataları. |
+| SNMP | IP, v1/v2c ve salt okunur community. | ENTITY-MIB model/üretici/seri, IP/IF-MIB MAC/topoloji, HOST-RESOURCES CPU/RAM/disk, desteklenirse HPE CPU MIB ve arayüz sayaçları. Sunulmayan sensörler **Ölçülmedi** görünür. |
+
+**İlk Windows testi:** Komut isteminde `ipconfig` ile kendi bilgisayarınızın IPv4 adresini bulun. Windows profiline o IP'yi girin ve **Mevcut Windows hesabımı kullan** seçeneğini işaretleyin. Yerel sorguda parola gerekmez. Başarılı sonuçta gerçek model/MAC/CPU/RAM görünmelidir. Bu test, Windows bilgisayarınızda çalıştırılmalıdır; Linux'taki merkez Windows CIM/DCOM toplayıcısını çalıştıramaz.
+
+**Uzak Windows hazırlığı:** WMI hizmeti, DCOM/RPC ve hedef güvenlik duvarı erişimi ile WMI okuma yetkili hesap gerekir. WMI/DCOM bağlantısı PacketPrivacy/PacketIntegrity ile açılır; parola işlem komut satırına konmaz, JSON yalnızca alt sürecin standart girdisinden verilir. WinRM/TrustedHosts ayarı değiştirilmez. Hesap yetkileri veya UAC güvenlik politikası otomatik gevşetilmez. İsteğe bağlı `WINDOWS_HEDEF_HAZIRLA.ps1 -MonitoringIP <merkezin-IPsi>` yardımcı dosyasını hedefte gözden geçirip yetkili PowerShell oturumunda çalıştırabilirsiniz; yalnızca o merkez IP'si için WMI hizmeti/iki güvenlik duvarı kuralını hazırlar. Betiğin gerçek Windows üzerinde çalışması bu geliştirme ortamında doğrulanmadı; kurum ilkeleri uygulanmalıdır.
+
+**Linux sunucu anahtarı:** Profilden **Sunucunun açık anahtarını oku** ile parmak izi alınır. Bu işlem kimlik doğrulama yapmaz ve anahtarı kendiliğinden güvenilir saymaz. Hedef konsolundaki `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` sonucu ile karşılaştırın; eşleşiyorsa doğrulama kutusunu işaretleyin. Farklı sunucu anahtarı türünde ilgili public key dosyasını kullanın. Bilinmeyen/değişmiş anahtara parola gönderilmez. SSH komutu yalnızca bu projenin sabit, salt okunur Python betiğini çalıştırır; uzak cihaza paket kurulmaz veya yapılandırma yazılmaz. Seri numarası gibi ayrıcalıklı alanlar boş kalabilir.
+
+Profilinizi **Test et** ile doğruladıktan sonra **Düzenle → Otomatik taramalarda kullan** seçeneğini açın. IP aralığına genişletirken yalnızca aynı hesabın yetkili olduğu kapsamı seçin. En dar CIDR kapsamı önceliklidir; Windows/Linux için uygun tek profil seçilir, parola listeleri denenmez. Aynı profilin cihazları sırayla okunur. Kimlik/anahtar/erişim reddi hatasında otomatik profil duraklatılır; sorunu düzelttikten sonra yeniden test edip etkinleştirin. Manuel test, kapalı profilde de tek hedef için çalışır. Otomatik Windows sorgusu açık RPC 135, Linux sorgusu profilin açık SSH portu üzerinden seçilir.
+
+**Ölçümler:** Cihazın Bilgiler ekranında son başarılı kaynak/zaman, CPU, RAM, diskler ve ağ hızları görünür. Cihaz başına 500 ölçüm saklanır; son 60 CPU ölçümü gösterilir. CPU/RAM/disk %90 üstünde ve yeni arayüz hatasında uyarı kaydı oluşur. SNMP hızları iki geçerli sayaç örneği arasındaki farktan hesaplanır; sayaç sıfırlanması/taşması sıçrama olarak gösterilmez. Duplex kapasitesinin iki yönü ayrı değerlendirilir. Henüz yeterli örnek yoksa hız boş bırakılır. Bunlar fiziksel donanım sensörleri, kablo testi veya özel bir ICMP paket kaybı testi değildir. Veri alınamadığında önceki değer ve son başarılı zaman korunur; hata ayrıca gösterilir. Elle girilen envanter ad/model/OS alanları otomatik bilginin önüne geçer.
+
+**Kimlik koruması ve taşıma:** Profil parolaları/community/SSH özel anahtarları API, CSV veya Git çıktısına eklenmez. Windows'ta DPAPI ile o Windows kullanıcı hesabına bağlı korunur. Linux geliştirme ortamında Fernet ve 0600 izinli data/credentials.key kullanılır. Bu anahtar da yedekle korunmalıdır. Eski genel SNMP ayarları geriye uyumluluk için önceki biçiminde kalır. data/ ve yedekleri hassastır. Profili silmek envanter/ölçüm geçmişini silmez. Yeni Windows sunucuya veri taşırken DPAPI kimlikleri farklı makine/kullanıcıda açılamayabilir; ilgili profilleri yeni çalışma hesabında silip yeniden oluşturun. Windows servis kurulacaksa korunan profiller o servis hesabında oluşturulmalıdır. Linux'a taşınırsa Windows okuması için ayrıca bir Windows toplayıcı veya ileride bir WinRM adaptörü gerekir.
+
+Gerçek Linux SSH taşıması, anahtar eşleşmesi ve yerel Linux ölçümleri bu geliştirme ortamında doğrulandı. Windows script aktarımı/yanıt işleme kontrollü yanıtlarla, SNMP sensörleri MIB örnekleriyle ve profil ekranları Chromium ile test edildi. **Sizin Windows/Linux/switch cihazlarınızdaki üç gerçek okuma henüz doğrulanmadı.** İlk aşamanın kabulü, bu cihazlarda Test et sonucunda alınan model/MAC ve mevcut sensörlerin kontrol edilmesidir.
+
 ## SNMP bilmeden hızlı keşif
 
 **Ağ ayarları** bölümünde IP aralıklarını girip **Kaydet ve keşfet** seçeneğini kullanın. Community veya SNMP sürümü bilmeniz gerekmez. SNMP alanları isteğe bağlı gelişmiş ayrıntılardır; boş community temel keşfi engellemez. Bulunan cihazlar, ayrı **MAC adresi** sütunu ve açık SSH/RDP/VNC portları listelenir.
@@ -127,7 +155,7 @@ Uzak hesap parolası kaydedilmez. Oturum isteği Apache'nin resmi JSON-auth söz
 
 Docker servislerini durdurmak için `docker compose -f gateway/compose.yaml stop`, tekrar başlatmak için `docker compose -f gateway/compose.yaml up -d` kullanın. Guacamole loglarında oturum kullanıcı/IP bilgileri bulunabilir; paylaşmadan önce inceleyin. Bu tek kullanıcılı yerel kurulum kurumsal RBAC, oturum kaydı veya yetki delegasyonu sağlamaz.
 
-CPU/RAM kullanımı, disk doluluğu, trafik grafikleri, MAC adresi, vCenter API ve SSH/WMI/WinRM ile donanım envanteri henüz uygulanmadı.
+vCenter API, SNMPv3, donanım sıcaklık sensörleri ve tam bir ICMP paket kaybı/jitter testi henüz uygulanmadı. Windows/Linux ve standart SNMP yük bilgileri için bağlantı profilleri bölümünü kullanın.
 
 ## Başka bir bilgisayardan panele erişme
 
@@ -145,7 +173,7 @@ Panelde **Erişim anahtarı** bölümüne aynı değeri girin. Anahtar sekmenin 
 Uygulamayı durdurduktan sonra `data/` dizinini yedekleyin. Çalışan veritabanı için SQLite online backup API kullanın; WAL dosyalarını göz ardı ederek yalnızca ana dosyayı kopyalamayın. Farklı veritabanıyla çalıştırmak için `python app.py --db /path/to/atlas.sqlite3` kullanın.
 
 ```sh
-python -m pip install -r requirements-gateway.txt
+python -m pip install -r requirements-collectors.txt
 python -m unittest discover -s tests -v
 node --check static/app.js  # Node varsa isteğe bağlı JavaScript sözdizimi kontrolü
 ```

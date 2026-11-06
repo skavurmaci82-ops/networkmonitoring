@@ -5,12 +5,50 @@ import unittest
 from unittest.mock import patch
 
 from app import Store, network_groups
-from discovery import ARP, IF, IP_IF, LLDP, REM, inspect_network, local_neighbors, mac_address, topology
+from discovery import ARP, IF, IP_IF, LLDP, REM, inspect_network, local_neighbors, mac_address, topology, windows_arp
 from snmp import Reader, encode_oid, integer, response_packet, tlv
 from test_app import result
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_windows_native_arp_reads_local_mac_without_snmp(self):
+        class Helper:
+            def GetBestRoute(self,destination,source,route):
+                route._obj.next_hop=0
+                return 0
+            def SendARP(self,destination,source,buffer,length):
+                for i,value in enumerate(bytes.fromhex('000b86001234')):
+                    buffer[i]=value
+                length._obj.value=6
+                return 0
+        data=windows_arp('192.168.10.12',Helper())
+        self.assertEqual(data['mac'],'00:0B:86:00:12:34')
+        self.assertEqual(data['scope'],'local')
+
+    def test_windows_routed_destination_never_uses_gateway_mac(self):
+        class Helper:
+            called=False
+            def GetBestRoute(self,destination,source,route):
+                route._obj.next_hop=1
+                return 0
+            def SendARP(self,*args):
+                self.called=True
+                return 0
+        helper=Helper()
+        data=windows_arp('192.168.100.12',helper)
+        self.assertFalse(helper.called)
+        self.assertEqual(data['scope'],'routed')
+        self.assertEqual(data['mac'],'')
+
+    def test_windows_arp_failure_is_not_a_made_up_mac(self):
+        class Helper:
+            def GetBestRoute(self,destination,source,route):
+                route._obj.next_hop=0
+                return 0
+            def SendARP(self,*args):
+                return 67
+        self.assertEqual(windows_arp('192.168.10.12',Helper())['mac'],'')
+
     def test_binary_mac_is_preserved_and_invalid_macs_rejected(self):
         raw = bytes.fromhex('000b86001234')
         self.assertEqual(mac_address(raw), '00:0B:86:00:12:34')

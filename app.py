@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from snmp import identify
-from discovery import inspect_network, local_neighbors, mac_address, topology
+from discovery import inspect_network, local_neighbors, mac_address, topology, windows_arp
 from gateway import session_url
 import vendors
 
@@ -39,7 +39,8 @@ IDENTITY_COLUMNS = {'detected_model': "TEXT NOT NULL DEFAULT ''", 'detected_seri
                     'interfaces': "TEXT NOT NULL DEFAULT '[]'", 'lldp_neighbors': "TEXT NOT NULL DEFAULT '[]'",
                     'chassis_id': "TEXT NOT NULL DEFAULT ''", 'network_checked_at': 'TEXT',
                     'network_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'lldp_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'lldp_checked_at': 'TEXT',
-                    'forwarding': "TEXT NOT NULL DEFAULT '[]'", 'forwarding_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'forwarding_checked_at': 'TEXT'}
+                    'forwarding': "TEXT NOT NULL DEFAULT '[]'", 'forwarding_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'forwarding_checked_at': 'TEXT',
+                    'mac_status': "TEXT NOT NULL DEFAULT 'unknown'"}
 
 
 def now():
@@ -161,6 +162,9 @@ class Store:
             for field in ('mac_addresses', 'interfaces', 'lldp_neighbors', 'forwarding'):
                 row[field] = json.loads(row[field])
             row['mac_vendor'] = vendors.lookup(row['mac_addresses'], vendor_registry['prefixes'])
+            row['mac_note'] = ('Farklı ağ/VLAN: uzak cihazın MAC adresi yönlendirme üzerinden okunamaz.' if row['mac_status'] == 'routed'
+                               else 'Yerel ARP yanıtında MAC bulunamadı.' if row['mac_status'] == 'local'
+                               else 'MAC henüz okunamadı; yerel ağ bağlantısını kontrol edin.')
             row['display_name'] = row['name'] or row['detected_name'] or 'Adsız cihaz'
             row['display_model'] = row['model'] or row['detected_model']
             row['display_serial'] = row['serial'] or row['detected_serial']
@@ -263,6 +267,12 @@ class Store:
             stamp, ports = now(), json.dumps(result['ports'])
             db.execute('''UPDATE devices SET status=?,latency=?,ports=?,last_checked=?,last_seen=?,failures=? WHERE id=?''',
                        (status, result['latency'], ports, stamp, stamp if reachable else old['last_seen'], failures, old['id']))
+            arp = result.get('arp')
+            if arp:
+                db.execute('UPDATE devices SET mac_status=? WHERE id=?', (arp.get('scope', 'unknown'), old['id']))
+                if mac_address(arp.get('mac')):
+                    db.execute('UPDATE devices SET mac_addresses=?,mac_source=?,mac_checked_at=? WHERE id=?',
+                               (json.dumps([mac_address(arp['mac'])]), 'Windows SendARP · doğrudan yerel ağ', stamp, old['id']))
             snmp = result.get('snmp')
             if snmp:
                 db.execute('UPDATE devices SET snmp_status=? WHERE id=?', (snmp['status'], old['id']))
@@ -358,7 +368,10 @@ def probe(ip, ports=PORTS, timeout=0.35, snmp_config=None):
     detail = inspect_network(ip, snmp_config or {}) if snmp['status'] == 'ok' else None
     if snmp['status'] == 'ok' and not latencies:
         latencies.append(snmp.get('latency', (time.monotonic() - snmp_start) * 1000))
-    return {'ip': ip, 'reachable': bool(opened) or icmp or snmp['status'] == 'ok', 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind, 'snmp': snmp, 'network_detail': detail}
+    arp = windows_arp(ip)
+    if arp.get('mac') and not latencies:
+        latencies.append(arp.get('latency', 0))
+    return {'ip': ip, 'reachable': bool(opened) or icmp or snmp['status'] == 'ok' or bool(arp.get('mac')), 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind, 'snmp': snmp, 'network_detail': detail, 'arp': arp}
 
 
 class Monitor:
@@ -408,6 +421,9 @@ class Monitor:
                     observations.extend((result.get('network_detail') or {}).get('arp', []))
                     with self.lock:
                         self.state['done'] += 1
+                        completed = self.state['done']
+                    if completed % 32 == 0:
+                        self.store.observe_macs(local_neighbors(), set(targets))
             if not self.stop.is_set():
                 observations.extend(local_neighbors())
                 self.store.observe_macs(observations, set(targets))

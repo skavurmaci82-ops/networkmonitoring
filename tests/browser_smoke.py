@@ -38,6 +38,7 @@ def main():
                 assert page.locator('#total').inner_text() == '0'
                 page.locator('.nav-item[data-view=settings]').click()
                 assert page.locator('#ranges').input_value().splitlines() == ['192.168.10.0/23', '192.168.100.0/23', '192.168.24.0/24', '192.168.25.0/24']
+                page.locator('.advanced-discovery summary').click()
                 page.locator('#snmp-enabled').check()
                 page.locator('#snmp-community').fill('local-browser-test')
                 page.locator('#settings-form button[type=submit]').click()

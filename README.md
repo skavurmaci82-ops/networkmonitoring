@@ -1,5 +1,17 @@
 # AğAtlas
 
+## SNMP bilmeden hızlı keşif
+
+**Ağ ayarları** bölümünde IP aralıklarını girip **Kaydet ve keşfet** seçeneğini kullanın. Community veya SNMP sürümü bilmeniz gerekmez. SNMP alanları isteğe bağlı gelişmiş ayrıntılardır; boş community temel keşfi engellemez. Bulunan cihazlar, ayrı **MAC adresi** sütunu ve açık SSH/RDP/VNC portları listelenir.
+
+Windows'ta yerel cihazların MAC adresi **GetBestRoute + SendARP** IP Helper API'siyle doğrudan alınır; SNMP ve üçüncü taraf paket sürücüsü gerekmez. ARP yanıtı veren, ICMP/TCP yanıtı vermeyen yerel cihazlar da keşfedilir. MAC sonucu tüm taramanın bitmesi beklenmeden kaydedilir. İşletim sistemi önbelleği ayrıca her 32 kontrol sonunda ve tarama bitiminde okunur.
+
+**Farklı VLAN/yönlendirilmiş ağların cihaz MAC'leri, yalnızca IP erişimiyle uzaktan okunamaz.** Uzak cihaz yerine router MAC'i gösterilmez. Böyle durumlarda MAC alanında açıklama görünür. SNMP kullanmadan o ağların MAC'lerini toplamak için taramayı ilgili VLAN'a doğrudan bağlı bir bilgisayarda çalıştırmak gerekir. Tam marka/model bilgisi de her cihazda kimlik doğrulamasız sunulmayabilir.
+
+Tarayıcı erişim sunucusu kurulu değilse erişim düğmesi yine açılır; **Bilgisayarımdaki istemciyle bağlan** seçeneği RDP/SSH/VNC bağlantı dosyasını indirir. Dosyayı ilgili Windows istemcisinde açın. SSH dosyasında cihaz bilgilerindeki SSH kullanıcı adı kullanılır; boşsa Windows kullanıcı adı geçerlidir. Tarayıcı içi oturumlar için aşağıdaki Docker/Guacamole kurulumu geçerlidir. Keşif, hedef cihazda kapalı uzak erişim servisini açmaz veya hesabınıza giriş yetkisi vermez.
+
+Windows native API çağrısı yerel testlerde sahte API yanıtlarıyla doğrulandı; gerçek Windows ağına bu geliştirme ortamından erişilemedi. SNMP'siz tek düğmeli keşif, MAC gösterimi ve Docker'sız bağlantı dosyaları gerçek Chromium ile kontrollü veriler üzerinde test edildi.
+
 Türkçe web arayüzlü, özel IPv4 ağları için cihaz keşfi, erişilebilirlik izleme ve sunucu envanter uygulaması. Python 3.10+ ve SQLite ile çalışır; temel keşif/izleme için harici Python paketi veya veritabanı sunucusu gerekmez. Tarayıcı içi uzak erişim için Docker Desktop, Apache Guacamole ve requirements-gateway.txt içindeki bağımlılık gerekir.
 
 ## Çalıştırma
@@ -59,7 +71,7 @@ Her kayıtlı CIDR ayrı bir kart ve tablo grubu olarak görünür. Kartta topla
 
 ## Otomatik model tespiti · SNMP
 
-1. **Ağ ayarları → Otomatik model tespiti** bölümünde SNMP'yi etkinleştirin.
+1. İsteğe bağlı olarak **Ağ ayarları → Gelişmiş bilgiler · SNMP** bölümünde SNMP'yi etkinleştirin.
 2. Cihazlarda kullanılan sürümü (v2c veya v1) ve **salt okunur community** değerini uygulamaya girin. Değeri sohbet, GitHub veya kod dosyalarında paylaşmayın.
 3. **Ayarları kaydet → Ağı tara** seçeneğini kullanın. Community, tüm yapılandırılmış ağlar için ortak kullanılır; farklı community gerektiren ağ profilleri ve SNMPv3 bu sürümde desteklenmez.
 

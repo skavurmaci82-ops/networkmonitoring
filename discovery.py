@@ -6,6 +6,9 @@ import re
 import shutil
 import subprocess
 import time
+import ctypes
+import socket
+import struct
 
 from snmp import Client
 
@@ -16,6 +19,47 @@ FDB = '1.3.6.1.2.1.17.4.3.1.2'
 BRIDGE_IF = '1.3.6.1.2.1.17.1.4.1.2'
 LLDP = '1.0.8802.1.1.2.1'
 REM = LLDP + '.4.1.1'
+
+
+class ForwardRoute(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        'destination', 'mask', 'policy', 'next_hop', 'interface', 'type', 'protocol',
+        'age', 'next_hop_as', 'metric1', 'metric2', 'metric3', 'metric4', 'metric5')]
+
+
+def windows_arp(ip, helper=None):
+    """Use Windows IP Helper directly, only for on-link IPv4 destinations.
+
+    Routing is checked first so an upstream gateway MAC is never presented as
+    the remote host's MAC. No SNMP, third-party driver or admin shell required.
+    """
+    if platform.system() != 'Windows' and helper is None:
+        return {'mac': '', 'scope': 'unknown'}
+    try:
+        address = str(ipaddress.IPv4Address(ip))
+        destination = struct.unpack('=I', socket.inet_aton(address))[0]
+        if helper is None:
+            helper = ctypes.WinDLL('iphlpapi', use_last_error=True)
+            helper.GetBestRoute.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ForwardRoute)]
+            helper.GetBestRoute.restype = ctypes.c_uint32
+            helper.SendARP.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(ctypes.c_uint32)]
+            helper.SendARP.restype = ctypes.c_uint32
+        route = ForwardRoute()
+        if helper.GetBestRoute(destination, 0, ctypes.byref(route)) != 0:
+            return {'mac': '', 'scope': 'unknown'}
+        if route.next_hop != 0:
+            return {'mac': '', 'scope': 'routed'}
+        # IP Helper's PULONG output is conventionally two DWORDs (8 bytes),
+        # while the requested Ethernet address length is six bytes.
+        storage = (ctypes.c_uint32 * 2)()
+        buffer = ctypes.cast(storage, ctypes.POINTER(ctypes.c_ubyte))
+        length = ctypes.c_uint32(6)
+        start = time.monotonic()
+        code = helper.SendARP(destination, 0, buffer, ctypes.byref(length))
+        mac = mac_address(ctypes.string_at(storage, 6)) if code == 0 and length.value == 6 else ''
+        return {'mac': mac, 'scope': 'local', 'latency': round((time.monotonic()-start)*1000, 2)}
+    except (OSError, AttributeError, ValueError):
+        return {'mac': '', 'scope': 'unknown'}
 
 
 def mac_address(value):

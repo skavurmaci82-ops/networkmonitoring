@@ -113,6 +113,23 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(data['ports'], [])
         self.assertEqual(data['latency'], 2)
 
+    def test_arp_only_device_is_discovered_and_mac_immediately_persisted(self):
+        with patch('app.shutil.which',return_value=None),patch('app.windows_arp',return_value={'mac':'00:0B:86:00:12:34','scope':'local','latency':1.5}):
+            data=probe('192.168.10.12',ports=[])
+        self.assertTrue(data['reachable'])
+        self.assertEqual(data['snmp']['status'],'not_configured')
+        self.store.record(data)
+        device=self.store.devices()[0]
+        self.assertEqual(device['mac_addresses'],['00:0B:86:00:12:34'])
+        self.assertEqual(device['status'],'online')
+        self.assertIn('Windows SendARP',device['mac_source'])
+
+    def test_missing_routed_mac_has_an_explanation(self):
+        data=result()
+        data['arp']={'scope':'routed','mac':''}
+        self.store.record(data)
+        self.assertIn('Farklı ağ/VLAN',self.store.devices()[0]['mac_note'])
+
 
 class FeatureHTTPTests(unittest.TestCase):
     setUp = test_app.HTTPTests.setUp

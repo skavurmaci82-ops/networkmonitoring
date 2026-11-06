@@ -134,12 +134,25 @@ class SNMPTests(unittest.TestCase):
     def test_walk_stops_on_repeated_oid(self):
         class Agent(Client):
             calls = 0
-            def query(self, oids, next_value=False):
+            def query(self, oids, next_value=False, **kwargs):
                 self.calls += 1
                 return [(MODEL + '.1', 'test')]
         agent = Agent('127.0.0.1', 'local-test')
         self.assertEqual(list(agent.walk(MODEL)), [(MODEL + '.1', 'test')])
         self.assertEqual(agent.calls, 2)
+
+    def test_bulk_walk_yields_all_rows_and_marks_a_complete_table(self):
+        class Agent(Client):
+            calls = 0
+            def query(self, oids, **kwargs):
+                self.calls += 1
+                self.used_bulk = kwargs.get('bulk')
+                return [(MODEL+'.1','one'),(MODEL+'.2','two'),('1.3.6.1.2.1.48.1','outside')]
+        agent = Agent('127.0.0.1','test')
+        self.assertEqual(list(agent.walk(MODEL)),[(MODEL+'.1','one'),(MODEL+'.2','two')])
+        self.assertTrue(agent.used_bulk)
+        self.assertEqual(agent.calls,1)
+        self.assertEqual(agent.walk_status[MODEL],'complete')
 
 
 if __name__ == '__main__':

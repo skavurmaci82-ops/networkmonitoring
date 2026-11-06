@@ -21,6 +21,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from snmp import identify
+from discovery import inspect_network, local_neighbors, mac_address, topology
+from gateway import session_url
+import vendors
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
@@ -31,7 +34,12 @@ IDENTITY_COLUMNS = {'detected_model': "TEXT NOT NULL DEFAULT ''", 'detected_seri
                     'sys_description': "TEXT NOT NULL DEFAULT ''", 'sys_object_id': "TEXT NOT NULL DEFAULT ''",
                     'model_source': "TEXT NOT NULL DEFAULT ''", 'snmp_checked_at': 'TEXT',
                     'snmp_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'agent_uptime': 'INTEGER',
-                    'ssh_user': "TEXT NOT NULL DEFAULT ''"}
+                    'ssh_user': "TEXT NOT NULL DEFAULT ''", 'mac_addresses': "TEXT NOT NULL DEFAULT '[]'",
+                    'mac_source': "TEXT NOT NULL DEFAULT ''", 'mac_checked_at': 'TEXT',
+                    'interfaces': "TEXT NOT NULL DEFAULT '[]'", 'lldp_neighbors': "TEXT NOT NULL DEFAULT '[]'",
+                    'chassis_id': "TEXT NOT NULL DEFAULT ''", 'network_checked_at': 'TEXT',
+                    'network_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'lldp_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'lldp_checked_at': 'TEXT',
+                    'forwarding': "TEXT NOT NULL DEFAULT '[]'", 'forwarding_status': "TEXT NOT NULL DEFAULT 'unavailable'", 'forwarding_checked_at': 'TEXT'}
 
 
 def now():
@@ -64,10 +72,10 @@ def group_for_ip(ip, ranges):
 
 
 def network_groups(devices, ranges):
-    groups = {cidr: {'network': cidr, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0} for cidr in ranges}
+    groups = {cidr: {'network': cidr, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0, 'observed': 0} for cidr in ranges}
     for device in devices:
         name = device['network']
-        group = groups.setdefault(name, {'network': name, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0})
+        group = groups.setdefault(name, {'network': name, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0, 'observed': 0})
         group['total'] += 1
         group[device['effective_status']] += 1
     return list(groups.values())
@@ -147,8 +155,12 @@ class Store:
         with self.db() as db:
             rows = [dict(r) for r in db.execute('SELECT * FROM devices')]
         settings = self.settings()
+        vendor_registry = vendors.load(Path(self.path).parent / 'ieee-oui.json')
         for row in rows:
             row['ports'] = json.loads(row['ports'])
+            for field in ('mac_addresses', 'interfaces', 'lldp_neighbors', 'forwarding'):
+                row[field] = json.loads(row[field])
+            row['mac_vendor'] = vendors.lookup(row['mac_addresses'], vendor_registry['prefixes'])
             row['display_name'] = row['name'] or row['detected_name'] or 'Adsız cihaz'
             row['display_model'] = row['model'] or row['detected_model']
             row['display_serial'] = row['serial'] or row['detected_serial']
@@ -257,9 +269,30 @@ class Store:
                 if snmp['status'] == 'ok':
                     db.execute('''UPDATE devices SET detected_name=?,sys_description=?,sys_object_id=?,agent_uptime=?,snmp_checked_at=? WHERE id=?''',
                                (snmp.get('name', ''), snmp.get('description', ''), snmp.get('object_id', ''), snmp.get('uptime'), stamp, old['id']))
+                    if snmp.get('manufacturer'):
+                        db.execute('UPDATE devices SET manufacturer=? WHERE id=?', (snmp['manufacturer'], old['id']))
                     if snmp.get('model'):
                         db.execute('''UPDATE devices SET detected_model=?,detected_serial=?,manufacturer=?,model_source=? WHERE id=?''',
                                    (snmp['model'], snmp.get('serial', ''), snmp.get('manufacturer', ''), snmp.get('source', ''), old['id']))
+            detail = result.get('network_detail')
+            if detail is not None:
+                db.execute('UPDATE devices SET network_status=?,network_checked_at=?,lldp_status=? WHERE id=?',
+                           ('partial' if detail.get('collection_limited') else 'ok', stamp, detail['lldp_status'], old['id']))
+                if detail.get('interfaces'):
+                    db.execute('UPDATE devices SET interfaces=? WHERE id=?', (json.dumps(detail['interfaces']), old['id']))
+                if detail.get('neighbors') or detail['lldp_status'] == 'read':
+                    db.execute('UPDATE devices SET lldp_neighbors=?,lldp_checked_at=? WHERE id=?', (json.dumps(detail['neighbors']), stamp, old['id']))
+                if detail.get('chassis_id'):
+                    db.execute('UPDATE devices SET chassis_id=? WHERE id=?', (detail['chassis_id'], old['id']))
+                db.execute('UPDATE devices SET forwarding_status=? WHERE id=?', (detail.get('forwarding_status', 'unavailable'), old['id']))
+                if detail.get('forwarding') or detail.get('forwarding_status') == 'complete':
+                    db.execute('UPDATE devices SET forwarding=?,forwarding_checked_at=? WHERE id=?', (json.dumps(detail.get('forwarding', [])), stamp, old['id']))
+                if detail.get('macs'):
+                    db.execute('UPDATE devices SET mac_addresses=?,mac_source=?,mac_checked_at=? WHERE id=?',
+                               (json.dumps(detail['macs']), 'SNMP IP-MIB / IF-MIB', stamp, old['id']))
+            elif snmp and snmp['status'] != 'ok':
+                db.execute('UPDATE devices SET network_status=?,lldp_status=? WHERE id=?', (snmp['status'], 'unavailable', old['id']))
+                db.execute("UPDATE devices SET forwarding_status='unavailable' WHERE id=?", (old['id'],))
             db.execute('INSERT INTO checks(device_id,checked_at,reachable,latency,ports) VALUES (?,?,?,?,?)',
                        (old['id'], stamp, int(reachable), result['latency'], ports))
             # Keep the most recent 500 checks per device and 2000 global events.
@@ -271,6 +304,22 @@ class Store:
             if not db.execute('SELECT 1 FROM devices WHERE id=?', (device_id,)).fetchone():
                 raise LookupError('Cihaz bulunamadı.')
             return [dict(r) for r in db.execute('SELECT * FROM checks WHERE device_id=? ORDER BY id DESC LIMIT 60', (device_id,))]
+
+    def observe_macs(self, observations, allowed_ips):
+        """Cache evidence creates observed inventory, never an Online check."""
+        with self.db() as db:
+            for observation in observations:
+                ip, mac = observation.get('ip'), mac_address(observation.get('mac'))
+                if ip not in allowed_ips or not mac:
+                    continue
+                ip_value(ip)
+                stamp = now()
+                old = db.execute('SELECT id FROM devices WHERE ip=?', (ip,)).fetchone()
+                if not old:
+                    row = db.execute("INSERT INTO devices(ip,first_seen,status) VALUES(?,?,'observed')", (ip, stamp))
+                    self.event(db, row.lastrowid, ip, 'MAC tablosunda görüldü · canlılık henüz doğrulanmadı', 'info')
+                db.execute('UPDATE devices SET mac_addresses=?,mac_source=?,mac_checked_at=? WHERE ip=?',
+                           (json.dumps([mac]), observation.get('source', 'ARP tablosu'), stamp, ip))
 
     def events(self):
         with self.db() as db:
@@ -306,9 +355,10 @@ def probe(ip, ports=PORTS, timeout=0.35, snmp_config=None):
     kind = 'Yazıcı' if any(p in opened for p in (9100, 631, 515)) else 'Sunucu' if any(p in opened for p in (22, 445, 3389, 902, 8006)) else 'Diğer'
     snmp_start = time.monotonic()
     snmp = identify(ip, snmp_config or {})
+    detail = inspect_network(ip, snmp_config or {}) if snmp['status'] == 'ok' else None
     if snmp['status'] == 'ok' and not latencies:
         latencies.append(snmp.get('latency', (time.monotonic() - snmp_start) * 1000))
-    return {'ip': ip, 'reachable': bool(opened) or icmp or snmp['status'] == 'ok', 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind, 'snmp': snmp}
+    return {'ip': ip, 'reachable': bool(opened) or icmp or snmp['status'] == 'ok', 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind, 'snmp': snmp, 'network_detail': detail}
 
 
 class Monitor:
@@ -345,6 +395,7 @@ class Monitor:
     def run(self, targets):
         try:
             config = self.store.snmp_settings()
+            observations = []
             with ThreadPoolExecutor(max_workers=32) as pool:
                 pending = {pool.submit(self.probe, ip) if self.probe else pool.submit(probe, ip, snmp_config=config) for ip in targets}
                 for future in as_completed(pending):
@@ -352,9 +403,14 @@ class Monitor:
                         for task in pending:
                             task.cancel()
                         break
-                    self.store.record(future.result())
+                    result = future.result()
+                    self.store.record(result)
+                    observations.extend((result.get('network_detail') or {}).get('arp', []))
                     with self.lock:
                         self.state['done'] += 1
+            if not self.stop.is_set():
+                observations.extend(local_neighbors())
+                self.store.observe_macs(observations, set(targets))
         except Exception:
             logging.exception('Tarama başarısız')
             with self.lock:
@@ -378,7 +434,7 @@ class Monitor:
 def csv_export(devices):
     output = io.StringIO(newline='')
     writer = csv.writer(output)
-    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked', 'network', 'display_model', 'display_serial', 'display_model_source', 'snmp_status')
+    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked', 'network', 'display_model', 'display_serial', 'display_model_source', 'snmp_status', 'mac_addresses', 'mac_source', 'mac_checked_at', 'manufacturer', 'mac_vendor')
     writer.writerow(columns)
     for device in devices:
         values = []
@@ -386,6 +442,8 @@ def csv_export(devices):
             value = device.get(key)
             if value is None:
                 value = ''
+            if isinstance(value, list):
+                value = ', '.join(map(str, value))
             if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
                 value = "'" + value
             values.append(value)
@@ -400,6 +458,15 @@ class Server(ThreadingHTTPServer):
         self.store, self.token = store, token
         self.monitor = Monitor(store)
         super().__init__(address, Handler)
+
+    def gateway_config(self):
+        path = Path(self.store.path).parent / 'gateway.json'
+        if not path.exists():
+            return {'enabled': False}
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            return {'enabled': False}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -457,8 +524,17 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         if self.command == 'GET' and path == '/api/state':
             devices, settings = store.devices(), store.settings()
-            return self.send(200, {'devices': devices, 'groups': network_groups(devices, settings['ranges']), 'events': store.events(), 'settings': settings,
-                                   'scan': self.server.monitor.snapshot(), 'capabilities': {'icmp': bool(shutil.which('ping')), 'ports': PORTS}, 'server_time': now()})
+            return self.send(200, {'devices': devices, 'topology': topology(devices), 'groups': network_groups(devices, settings['ranges']), 'events': store.events(), 'settings': settings,
+                                   'scan': self.server.monitor.snapshot(), 'capabilities': {'icmp': bool(shutil.which('ping')), 'ports': PORTS, 'browser_access': bool(self.server.gateway_config().get('enabled'))}, 'server_time': now()})
+        if self.command == 'GET' and path == '/api/topology':
+            return self.send(200, topology(store.devices()))
+        if self.command == 'POST' and path == '/api/vendors/update':
+            self.body()
+            try:
+                count = vendors.update(Path(store.path).parent / 'ieee-oui.json')
+            except (OSError, ValueError):
+                raise RuntimeError('IEEE listesi indirilemedi. İnternet/HTTPS erişimini kontrol edin; mevcut liste korundu.') from None
+            return self.send(200, {'prefixes': count})
         if self.command == 'GET' and path == '/api/export':
             return self.send(200, csv_export(store.devices()), 'text/csv; charset=utf-8')
         if path.startswith('/api/devices/'):
@@ -466,6 +542,15 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) not in (3, 4, 5) or not parts[2].isdigit():
                 raise LookupError('Sayfa bulunamadı.')
             device_id = int(parts[2])
+            if self.command == 'POST' and len(parts) == 4 and parts[3] == 'session':
+                device = next((d for d in store.devices() if d['id'] == device_id), None)
+                if not device:
+                    raise LookupError('Cihaz bulunamadı.')
+                if device['effective_status'] != 'online':
+                    raise RuntimeError('Önce cihazın güncel Online durumunu taramayla doğrulayın.')
+                data = self.body()
+                url = session_url(device, data.get('protocol'), data, self.server.gateway_config())
+                return self.send(200, {'url': url, 'expires_in': 30})
             if self.command == 'GET' and len(parts) == 5 and parts[3] == 'connect' and parts[4] in ('ssh', 'rdp', 'vnc'):
                 device = next((d for d in store.devices() if d['id'] == device_id), None)
                 if not device:

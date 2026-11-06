@@ -6,13 +6,19 @@ import threading
 from playwright.sync_api import sync_playwright
 
 from app import Server, Store
+import json
 
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
         store = Store(Path(directory) / 'browser.sqlite3')
+        (Path(directory)/'gateway.json').write_text(json.dumps({'enabled':True,'url':'http://127.0.0.1:8088/guacamole','secret_key':'00112233445566778899aabbccddeeff'}))
         server = Server(('127.0.0.1', 0), store)
         server.monitor.probe = lambda ip: {'ip': ip, 'reachable': True, 'ports': [22, 443, 3389, 5900], 'latency': 2.1, 'kind': 'Sunucu',
+            'network_detail': {'interfaces': [{'index':1,'name':'1/1/7','mac':'00:0B:86:00:12:34','oper_status':1}],
+                               'macs':['00:0B:86:00:12:34' if ip=='192.168.10.12' else '00:0B:86:00:56:78'],
+                               'neighbors':[{'chassis_id':'00:0B:86:00:56:78','name':'test-switch','local_port':'1/1/7','remote_port':'1/1/24'}] if ip=='192.168.10.12' else [],
+                               'lldp_status':'read'},
             'snmp': {'status': 'ok', 'model': 'Aruba 2930F', 'manufacturer': 'Aruba', 'serial': 'TEST-123', 'name': 'test-switch',
                      'description': 'Synthetic SNMP test fixture', 'source': 'SNMP ENTITY-MIB (chassis)', 'uptime': 3600}}
         worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -72,17 +78,31 @@ def main():
                     page.locator('#export-button').click()
                 downloaded = download.value
                 assert 'BT Ekibi' in Path(downloaded.path()).read_text(encoding='utf-8-sig')
-                for protocol, expected in [('rdp', 'full address:s:192.168.10.12:3389'), ('ssh', 'ssh -l "admin" 192.168.10.12'), ('vnc', 'port=5900')]:
-                    with page.expect_download() as download:
-                        page.locator(f'[data-connect={protocol}]').click()
-                    assert expected in Path(download.value.path()).read_text()
+                for protocol in ['rdp','ssh','vnc']:
+                    page.locator(f'[data-connect={protocol}]').click()
+                    assert page.locator('#session-dialog').is_visible()
+                    assert page.locator('#session-title').inner_text().startswith(protocol.upper())
+                    page.locator('#session-password').fill('not-saved')
+                    page.locator('[data-close=session-dialog]').click()
+                    page.wait_for_function("() => document.querySelector('#session-password').value===''")
                 page.locator('#search').fill('')
                 page.locator('.nav-item[data-view=overview]').click()
                 page.locator('[data-network="192.168.10.12/32"]').click()
                 assert page.locator('.device-row').count() == 1
                 page.locator('#all-networks').click()
                 assert page.locator('.device-row').count() == 2
+                page.locator('.nav-item[data-view=topology]').click()
+                assert page.locator('#topology-canvas .topology-node').count()==2
+                assert page.locator('#topology-canvas .topology-edge').count()==1
+                assert not page.locator('#topology-empty').is_visible()
+                if os.environ.get('ATLAS_TOPOLOGY_SCREENSHOT'):
+                    page.screenshot(path=os.environ['ATLAS_TOPOLOGY_SCREENSHOT'],full_page=True)
+                with page.expect_download() as downloaded_topology:
+                    page.locator('#topology-json').click()
+                assert 'nodes' in json.loads(Path(downloaded_topology.value.path()).read_text())
+                page.locator('.nav-item[data-view=overview]').click()
                 if os.environ.get('ATLAS_SCREENSHOT'):
+
                     page.screenshot(path=os.environ['ATLAS_SCREENSHOT'], full_page=True)
                 page.set_viewport_size({'width': 390, 'height': 844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile layout overflows'
@@ -93,7 +113,7 @@ def main():
                 page.wait_for_function("() => document.querySelector('#total').textContent==='1'")
                 assert not errors, errors
                 browser.close()
-                print('PASS: real-browser SNMP settings, model display, network groups, SSH/RDP/VNC downloads, inventory, history, CSV, escaping, mobile layout; no browser errors')
+                print('PASS: real-browser SNMP settings, model display, network groups, browser session dialogs, topology export, inventory, history, CSV, escaping, mobile layout; no browser errors')
         finally:
             server.shutdown()
             server.monitor.stop.set()

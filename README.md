@@ -1,6 +1,6 @@
 # AğAtlas
 
-Türkçe web arayüzlü, özel IPv4 ağları için cihaz keşfi, erişilebilirlik izleme ve sunucu envanter uygulaması. Python 3.10+ ve SQLite ile çalışır; harici Python paketi, veritabanı sunucusu veya internet bağlantısı gerekmez.
+Türkçe web arayüzlü, özel IPv4 ağları için cihaz keşfi, erişilebilirlik izleme ve sunucu envanter uygulaması. Python 3.10+ ve SQLite ile çalışır; temel keşif/izleme için harici Python paketi veya veritabanı sunucusu gerekmez. Tarayıcı içi uzak erişim için Docker Desktop, Apache Guacamole ve requirements-gateway.txt içindeki bağımlılık gerekir.
 
 ## Çalıştırma
 
@@ -67,17 +67,53 @@ Sistem `sysDescr`, `sysName`, `sysObjectID`, `sysUpTime` alanlarını okur. Dona
 
 Elle girilen ad/model/seri numarası otomatik bilgilerin önüne geçer. Elle model alanını boşaltırsanız tespit edilen model kullanılır. Son başarılı SNMP model bilgisi sonraki yanıt başarısızlığında korunur; cihaz detayındaki son SNMP yanıtı ve SNMP durumu bilginin güncelliğini gösterir. SNMP agent çalışma süresi işletim sisteminin kesin açılış süresi olmayabilir; sayaç yeniden başlayabilir veya sarabilir.
 
-Community, yalnızca yerel SQLite veritabanında saklanır; API yanıtlarında ve CSV'de dönmez. Alanı boş bırakarak mevcut değeri koruyabilirsiniz. SNMP kutusunu kaldırmak sorgulamayı durdurur. Veritabanı ve yedeği community içerdiğinden dosya erişim izinlerini koruyun. v1/v2c ağ üzerinde şifrelenmez. Her cihaz için sorgu süresi ve yürünecek MIB satırları sınırlıdır; yalnızca GET/GETNEXT yapılır, SET yapılmaz.
+Community, yalnızca yerel SQLite veritabanında saklanır; API yanıtlarında ve CSV'de dönmez. Alanı boş bırakarak mevcut değeri koruyabilirsiniz. SNMP kutusunu kaldırmak sorgulamayı durdurur. Veritabanı ve yedeği community içerdiğinden dosya erişim izinlerini koruyun. v1/v2c ağ üzerinde şifrelenmez. Her cihaz için sorgu süresi ve yürünecek MIB satırları sınırlıdır; yalnızca GET/GETNEXT/GETBULK yapılır, SET yapılmaz.
 
-## SSH / RDP / VNC erişimi
+## MAC adresi, marka ve port envanteri
 
-Son kontrolde servis portu açık ve cihaz güncel Online ise **Bağlan** sütununda erişim düğmeleri görünür:
+Her cihazın yönetim IP adresi için MAC kaynağı ve son gözlem zamanı saklanır:
 
-- **SSH** (22): Windows OpenSSH için bir `.cmd` dosyası indirir; alternatif olarak gösterilen komutu Terminal'e kopyalayın. **Bilgiler → SSH kullanıcı adı** alanını ayarlayabilirsiniz. Boşsa SSH, bilgisayarınızdaki kullanıcı adını kullanır. Gerekirse Windows'un İsteğe Bağlı Özellikler bölümünden OpenSSH İstemcisi kurun.
-- **RDP** (3389): `.rdp` dosyası indirir. Dosyayı açtığınızda Windows Uzak Masaüstü istemcisi kimlik bilgilerinizi sorar.
-- **VNC** (5900–5902): TightVNC uyumlu `.vnc` dosyası indirir. Farklı bir VNC istemcisi kullanıyorsanız gösterilen `IP::port` adresini kopyalayın.
+- Aynı yerel ağda işletim sisteminin ARP/komşu önbelleği okunur (Windows `arp -a`, Linux `ip -j neigh`). Aktif TCP/ICMP kontrollerinden sonra önbellek tekrar okunur.
+- Yönlendirilmiş ağlarda erişilebilen router/switchlerin SNMP **IP-MIB/ipNetToMedia** tabloları okunur. Ön belleğin doluluğu ve SNMP view/ACL izinleri sonucu belirler. Bir gateway MAC'i otomatik olarak tüm uzak IP'lere atanmaz.
+- Cihazın yönetim IP’si **IP-MIB/ipAdEntIfIndex** ile kendi arayüzüne eşlenebiliyorsa **IF-MIB/ifPhysAddress** üzerinden MAC alınır. Diğer arayüzlerin MAC ve Up/Down bilgileri cihaz detayında ayrıca gösterilir.
 
-Dosyaları inceleyip kendi bilgisayarınızda açın. Tarayıcı içinde uzak masaüstü/terminal çalışmaz. Servisin açık olması hesabınızın giriş yetkisi olduğunu garanti etmez. Parolalar bağlantı dosyalarına yazılmaz ve uygulamada saklanmaz. Standart dışı servis portları bu sürümde yapılandırılamaz.
+Yalnızca MAC tablosunda görülen IP, **Tabloda görüldü** olarak envantere eklenir; ayrıca bir canlılık yanıtı alınmadan Online sayılmaz. Önbellek kaydı cihazın hâlâ o MAC'i kullandığının veya açık olduğunun kanıtı değildir; kaynak/zaman bilgilerini kontrol edin. Proxy ARP, sanal arayüzler ve IP değişiklikleri yorum gerektirebilir.
+
+Marka öncelikle SNMP ENTITY-MIB ve bilinen sysObjectID enterprise kayıtlarından okunur. **Ağ ayarları → IEEE üretici listesini güncelle** ile isteğe bağlı resmi IEEE OUI listesi indirilebilir. İndirme yalnızca sabit `https://standards-oui.ieee.org/oui/oui.csv` adresinden HTTPS ile yapılır; IP/MAC veya envanter gönderilmez. İnternet erişimi yoksa SNMP bilgileri kullanılmaya devam eder. Bu indirme bulut ortamında dış erişim kısıtı nedeniyle doğrulanmadı; ayrıştırma/arama testleri yerel örneklerle doğrulandı. MAC kayıt sahibi, cihaz modeli değildir. Rastgele/yerel yönetilen MAC'lere OUI üreticisi atanmaz. Fiziksel sunucudaki sanal NIC'in kayıt sahibi VMware gibi farklı bir kuruluş olabilir.
+
+## Ağ topolojisi
+
+**Ağ topolojisi** ekranı şu bilgileri sunar:
+
+- **LLDP-MIB**: kaynak cihaz/yerel port → uzak chassis/yönetim IP’si/uzak port/sysName. Envanter eşleştirmesi tekil yönetim IP'si, chassis MAC'i veya tam ve tekil SNMP adıyla yapılır. Belirsiz isimler birleştirilmez.
+- IP’si doğrulanamayan LLDP komşuları ayrı **LLDP komşusu** düğümleridir. Haritada görünmeleri Online oldukları anlamına gelmez.
+- **BRIDGE-MIB** MAC öğrenimi: switchin hangi portta bir MAC öğrendiği ayrıca toplanır. Haritada isteğe bağlı gösterilir ve **doğrudan kablo kanıtı değildir**. Uplink portundan arkasındaki birçok MAC öğrenilebilir. VLAN'a özgü Q-BRIDGE/FDB tabloları bu sürümde okunmaz.
+- Arama, bağlantısı bilinen/sorunlu cihaz filtresi, cihaz detayına tıklama ve SVG/JSON dışa aktarma.
+
+Aynı CIDR grubunda olmak çizgi üretmez. LLDP kanıtı bulunmayan bağlantılar uydurulmaz. Başarısız yeni okumada eski LLDP kanıtı zamanı korunur ve eski/kısmi olarak işaretlenir. LLDP local/remote port isimleri fiziksel ifIndex ile varsayımsal olarak eşlenmez. Harita otomatik yerleşir; yerleşimin yönü gerçek ağ hiyerarşisi iddiası değildir.
+
+SNMPv2c tablo yürümeleri GETBULK (16 satır) ile yapılır; gerektiğinde GETNEXT'e düşer. SNMPv1 GETNEXT kullanır. Cihaz başına kimlik sorgusu 4 saniye, ek ağ envanteri yaklaşık 10 saniye bütçeyle sınırlıdır. LLDP/arayüz/bridge-port tabloları en fazla 128, IPv4-arayüz tablosu 256, ARP/FDB tabloları 512 satırla sınırlıdır; büyük veya yavaş cihazlarda kısmi envanter oluşabilir. Sonuç tam topoloji garantisi değildir. Harita ilk 200 düğümü/500 görünür ilişkiyi, alt tablo ilk 200 ilişkiyi çizer; JSON çıktısı toplanmış tüm ilişkileri içerir.
+
+LLDP'nin açık olması yanında SNMP community'nin **LLDP-MIB, IF-MIB, IP-MIB, ENTITY-MIB ve BRIDGE-MIB** okuma izni gerekir. Firewall/ACL ve MIB view eksikliği boş veya kısmi veri üretebilir. Model cihaz tarafından sunulmadığında tam modeli yalnızca MAC adresinden çıkarmak mümkün değildir.
+
+## Tarayıcı içinde SSH / RDP / VNC
+
+Oturumlar Apache Guacamole ile **tarayıcıda yeni bir sekmede** açılır. Bilgisayarda RDP, VNC veya SSH masaüstü istemcisi gerekmez. AğAtlas sekmesi envanter/topoloji için açık kalır.
+
+Windows üzerinde bir kez:
+
+1. **Docker Desktop** kurun, gerekli WSL 2/sanallaştırma önkoşullarını tamamlayın ve **Linux containers** modunda başlatın: https://docs.docker.com/desktop/setup/install/windows-install/
+2. ZIP'i çıkardığınız AğAtlas klasöründe **TARAYICI_ERISIM_KUR.cmd** dosyasını çalıştırın. Betik Python bağımlılığını kurar, güvenli ve rastgele paylaşımlı anahtarı yerel data/ klasöründe üretir, resmi `guacamole/guacamole:1.6.0` ve `guacamole/guacd:1.6.0` servislerini başlatır. İlk kurulum için internet gerekir; tekrar çalıştırıldığında mevcut anahtar korunur.
+3. **BASLAT.cmd** ile AğAtlas'ı yeniden başlatın. Docker Desktop açık kalmalıdır. Yeniden başlatmalarda Docker servisleri `unless-stopped` politikasıyla geri gelir.
+4. Cihaz satırındaki **SSH / RDP / VNC** düğmesine basın, hedef cihazın kimlik bilgilerini girin ve **Tarayıcıda bağlan** seçeneğini kullanın. Tarayıcı yeni sekmeleri engelliyorsa bu siteye izin verin.
+
+Linux geliştirme ortamında eşdeğeri: `python -m pip install -r requirements-gateway.txt`, ardından `python gateway_setup.py`.
+
+Guacamole yalnızca `127.0.0.1:8088` üzerinde yayımlanır; guacd'nin 4822 portu hosta açılmaz. Anahtar `data/gateway.json` ve `data/guacamole.env` içinde kalır, API/CSV/Git'e eklenmez. Docker konteynerleri de hedef ağlara TCP erişimi sağlayabilmelidir; bilgisayarın VPN/rotası her Docker kurulumunda konteynere otomatik yansımayabilir.
+
+Uzak hesap parolası kaydedilmez. Oturum isteği Apache'nin resmi JSON-auth sözleşmesiyle HMAC-SHA256 imzalanır/AES-128-CBC şifrelenir, yalnızca seçili cihaz/protokolü kapsar ve 30 saniyelik açılış süresi taşır. Açılan oturumun süresi Guacamole tarafından yönetilir. RDP sertifika doğrulaması kapatılmaz; hedefin sertifikası Guacamole/FreeRDP tarafından güvenilir olmalıdır. SSH/RDP/VNC giriş yetkisi ve sunucu tarafındaki hesap/servis ayarları ayrıca gereklidir. NLA/AD, SSH anahtar tabanlı giriş ve gerçek Windows RDP oturumu bu ortamda doğrulanmadı. Desteklenen standart portlar SSH 22, RDP 3389, VNC 5900–5902'dir.
+
+Docker servislerini durdurmak için `docker compose -f gateway/compose.yaml stop`, tekrar başlatmak için `docker compose -f gateway/compose.yaml up -d` kullanın. Guacamole loglarında oturum kullanıcı/IP bilgileri bulunabilir; paylaşmadan önce inceleyin. Bu tek kullanıcılı yerel kurulum kurumsal RBAC, oturum kaydı veya yetki delegasyonu sağlamaz.
 
 CPU/RAM kullanımı, disk doluluğu, trafik grafikleri, MAC adresi, vCenter API ve SSH/WMI/WinRM ile donanım envanteri henüz uygulanmadı.
 
@@ -97,13 +133,14 @@ Panelde **Erişim anahtarı** bölümüne aynı değeri girin. Anahtar sekmenin 
 Uygulamayı durdurduktan sonra `data/` dizinini yedekleyin. Çalışan veritabanı için SQLite online backup API kullanın; WAL dosyalarını göz ardı ederek yalnızca ana dosyayı kopyalamayın. Farklı veritabanıyla çalıştırmak için `python app.py --db /path/to/atlas.sqlite3` kullanın.
 
 ```sh
+python -m pip install -r requirements-gateway.txt
 python -m unittest discover -s tests -v
 node --check static/app.js  # Node varsa isteğe bağlı JavaScript sözdizimi kontrolü
 ```
 
 Testler geçici veritabanları, sahte ağ sonuçları ve gerçek yerel TCP/UDP/HTTP bağlantıları kullanır; şirket ağlarını taramaz. Gerçek Linux/Windows/VMware/Aruba/yazıcı erişimi, kurulumun ağınıza yerleştirilmesinden sonra doğrulanmalıdır.
 
-İsteğe bağlı gerçek tarayıcı testi için Playwright ve Chromium kurulu bir geliştirme ortamında `PYTHONPATH=. python tests/browser_smoke.py` çalıştırın. Sistem Chromium'u kullanılacaksa `CHROMIUM_PATH` ortam değişkenini çalıştırılabilir dosyanın yoluna ayarlayın. Bu test geçici veritabanı ve sahte keşif/SNMP yanıtlarıyla SNMP ayarı, model gösterimi, ağ grupları, SSH/RDP/VNC dosyaları, envanter, geçmiş, CSV ve mobil görünümü doğrular. Gerçek Aruba, yazıcı, Windows istemcileri ve şirket ağları üzerinde uçtan uca test yapılmadı.
+İsteğe bağlı gerçek tarayıcı testi için Playwright ve Chromium kurulu bir geliştirme ortamında `PYTHONPATH=. python tests/browser_smoke.py` çalıştırın. Sistem Chromium'u kullanılacaksa `CHROMIUM_PATH` ortam değişkenini çalıştırılabilir dosyanın yoluna ayarlayın. Bu test geçici veritabanı ve sahte keşif/SNMP yanıtlarıyla SNMP ayarı, model gösterimi, ağ grupları, tarayıcı oturum diyalogları ve topoloji dışa aktarma, envanter, geçmiş, CSV ve mobil görünümü doğrular. Gerçek Aruba, yazıcı, Windows istemcileri ve şirket ağları üzerinde uçtan uca test yapılmadı.
 
 ## Mevcut Windows kurulumunu güncelleme
 
@@ -112,3 +149,7 @@ Testler geçici veritabanları, sahte ağ sonuçları ve gerçek yerel TCP/UDP/H
 3. Yeni ZIP'i ayrı bir klasöre çıkarın. Yeni klasördeki program dosyalarını eski uygulama klasörüne kopyalayıp değiştirin; mevcut **data/** klasörünü silmeyin veya değiştirmeyin. Yeni pakette data/ klasörü bulunmaz.
 4. Eski klasörde **BASLAT.cmd** ile yeniden başlatın. Var olan veritabanına yeni alanlar otomatik eklenir; envanter korunur. Tarayıcıda Ctrl+F5 ile yenileyin.
 5. Ağ ayarlarına SNMP community değerini yerel olarak girin, kaydedin ve yeniden tarayın.
+
+Gerçek Guacamole tarayıcı/VNC entegrasyon testi: çalışan `gateway/compose.yaml` servisleri ve `data/gateway.json` ile `PYTHONPATH=. CHROMIUM_PATH=/path/to/chromium GATEWAY_TEST_HOST=<bu-test-makinesinin-Dockerdan-erisilebilir-IPsi> python tests/gateway_smoke.py`. Bu test test makinesinde geçici bir RFB masaüstü açar; şirket cihazlarına bağlanmaz. Test hedefinin Docker ağ geçidi değil, Python test sürecinin çalıştığı makine olması gerekir.
+
+Guacamole JSON-auth uyumluluk referansı: https://github.com/apache/guacamole-client/blob/1.6.0/extensions/guacamole-auth-json/doc/README.md . Apache Guacamole resmi Docker imajları Apache projesinin bileşenleridir.

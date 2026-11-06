@@ -107,7 +107,7 @@ class FeatureTests(unittest.TestCase):
             connection_file(device, 'rdp')
 
     def test_snmp_only_device_is_discovered(self):
-        with patch('app.shutil.which', return_value=None), patch('app.identify', return_value={'status': 'ok', 'model': 'Aruba', 'latency': 2}):
+        with patch('app.shutil.which', return_value=None), patch('app.inspect_network', return_value=None), patch('app.identify', return_value={'status': 'ok', 'model': 'Aruba', 'latency': 2}):
             data = probe('192.168.10.12', ports=[], snmp_config={'enabled': True, 'community': 'local-test'})
         self.assertTrue(data['reachable'])
         self.assertEqual(data['ports'], [])

@@ -14,6 +14,9 @@ ENTITY = '1.3.6.1.2.1.47.1.1.1.1'
 MODEL = ENTITY + '.13'
 HR_TYPE = '1.3.6.1.2.1.25.3.2.1.2'
 PRINTER = '1.3.6.1.2.1.25.3.1.5'
+ENTERPRISE_VENDORS = {9: 'Cisco', 11: 'HPE', 232: 'HPE', 674: 'Dell', 6876: 'VMware',
+                      14823: 'Aruba', 2636: 'Juniper', 12356: 'Fortinet', 14988: 'MikroTik',
+                      2435: 'Brother', 1602: 'Canon', 253: 'Xerox'}
 
 
 def tlv(tag, value):
@@ -92,13 +95,13 @@ class Reader:
             raise ValueError('Unexpected BER data')
 
 
-def request_packet(oids, community, version, request_id, operation=0xA0):
+def request_packet(oids, community, version, request_id, operation=0xA0, repetitions=0):
     bindings = b''.join(tlv(0x30, encode_oid(oid) + tlv(5, b'')) for oid in oids)
-    pdu = tlv(operation, integer(request_id) + integer(0) + integer(0) + tlv(0x30, bindings))
+    pdu = tlv(operation, integer(request_id) + integer(0) + integer(repetitions) + tlv(0x30, bindings))
     return tlv(0x30, integer(version) + tlv(4, community.encode()) + pdu)
 
 
-def response_packet(data, community, version, request_id):
+def response_packet(data, community, version, request_id, raw_octets=False):
     root = Reader(data)
     message = Reader(root.read(0x30)[1])
     root.end()
@@ -122,7 +125,8 @@ def response_packet(data, community, version, request_id):
         tag, value = binding.read()
         binding.end()
         if tag == 4:
-            value = value.decode('utf-8', errors='replace').strip('\x00 \r\n')[:2000]
+            if not raw_octets:
+                value = value.decode('utf-8', errors='replace').strip('\x00 \r\n')[:2000]
         elif tag == 6:
             value = decode_oid(value)
         elif tag in (2, 0x41, 0x42, 0x43, 0x46):
@@ -141,13 +145,15 @@ class Client:
         self.version = 0 if version == '1' else 1
         self.port, self.timeout = port, timeout
         self.deadline = time.monotonic() + budget
+        self.walk_status = {}
 
-    def query(self, oids, next_value=False):
+    def query(self, oids, next_value=False, raw_octets=False, bulk=False):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             return []
         request_id = secrets.randbelow(0x7ffffffe) + 1
-        packet = request_packet(oids, self.community, self.version, request_id, 0xA1 if next_value else 0xA0)
+        operation = 0xA5 if bulk else 0xA1 if next_value else 0xA0
+        packet = request_packet(oids, self.community, self.version, request_id, operation, repetitions=16 if bulk else 0)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(min(self.timeout, remaining))
@@ -161,8 +167,8 @@ class Client:
                     sock.settimeout(min(self.timeout, remaining))
                     data = sock.recv(16384)
                     try:
-                        values = response_packet(data, self.community, self.version, request_id)
-                        if not next_value and [o for o, _ in values] != list(oids):
+                        values = response_packet(data, self.community, self.version, request_id, raw_octets=raw_octets)
+                        if not next_value and not bulk and [o for o, _ in values] != list(oids):
                             continue
                         return values
                     except ValueError:
@@ -173,17 +179,34 @@ class Client:
             pass
         return []
 
-    def walk(self, prefix, limit=12):
+    def walk(self, prefix, limit=12, raw_octets=False):
         current = prefix
-        for _ in range(limit):
-            values = self.query([current], next_value=True)
+        self.walk_status[prefix] = 'limited'
+        count = 0
+        while count < limit:
+            options = {'next_value': True}
+            if raw_octets:
+                options['raw_octets'] = True
+            if self.version == 1:
+                options['bulk'] = True
+            values = self.query([current], **options)
+            if not values and options.pop('bulk', False):
+                values = self.query([current], **options)
             if not values:
+                self.walk_status[prefix] = 'unavailable'
                 break
-            oid, value = values[0]
-            if not oid.startswith(prefix + '.') or tuple(map(int, oid.split('.'))) <= tuple(map(int, current.split('.'))):
-                break
-            yield oid, value
-            current = oid
+            for oid, value in values:
+                if not oid.startswith(prefix + '.') or value is None:
+                    self.walk_status[prefix] = 'complete'
+                    return
+                if tuple(map(int, oid.split('.'))) <= tuple(map(int, current.split('.'))):
+                    self.walk_status[prefix] = 'invalid'
+                    return
+                yield oid, value
+                current = oid
+                count += 1
+                if count >= limit:
+                    return
 
 
 def identify(ip, config, client_factory=Client):
@@ -200,6 +223,12 @@ def identify(ip, config, client_factory=Client):
               'latency': round((time.monotonic() - start) * 1000, 2)}
     uptime = system.get(SYS_UPTIME)
     result['uptime'] = uptime // 100 if isinstance(uptime, int) and uptime >= 0 else None
+    parts = result['object_id'].split('.')
+    if parts[:6] == ['1', '3', '6', '1', '4', '1'] and len(parts) > 6 and parts[6].isdigit():
+        vendor = ENTERPRISE_VENDORS.get(int(parts[6]))
+        if vendor:
+            result['manufacturer'] = vendor
+            result['manufacturer_source'] = 'SNMP sysObjectID enterprise'
     candidates = []
     for oid, model in client.walk(MODEL):
         if not isinstance(model, str) or not model.strip():
@@ -217,7 +246,9 @@ def identify(ip, config, client_factory=Client):
     chassis = next((c for c in candidates if c[0]), None)
     if chassis:
         _, model, serial, manufacturer = chassis
-        result.update(model=model[:200], serial=str(serial or '')[:200], manufacturer=str(manufacturer or '')[:200], source='SNMP ENTITY-MIB (chassis)')
+        result.update(model=model[:200], serial=str(serial or '')[:200], manufacturer=str(manufacturer or result.get('manufacturer', ''))[:200], source='SNMP ENTITY-MIB (chassis)')
+        if manufacturer:
+            result['manufacturer_source'] = 'SNMP ENTITY-MIB'
     else:
         for oid, device_type in client.walk(HR_TYPE, limit=8):
             if device_type == PRINTER:

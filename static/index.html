@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AğAtlas · Ağ ve sunucu envanteri</title><link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-icon">⌘</span><span>AğAtlas<small>NETWORK OPERATIONS</small></span></a>
+    <div class="workspace"><span class="workspace-icon">A</span><div>Çalışma alanım<small>Yerel ağ yönetimi</small></div><span class="green-dot"></span></div>
+    <div class="nav-label">ÇALIŞMA ALANI</div>
+    <nav aria-label="Ana menü">
+      <button class="nav-item active" data-view="overview"><span>◫</span> Genel bakış</button>
+      <button class="nav-item" data-view="inventory"><span>▤</span> Cihaz envanteri</button>
+      <button class="nav-item" data-view="events"><span>◷</span> Olay geçmişi</button>
+      <button class="nav-item" data-view="settings"><span>⚙</span> Ağ ayarları</button>
+    </nav>
+    <div class="sidebar-bottom"><span class="green-dot"></span> Yerel izleme motoru<small id="capability">Bağlantı kuruluyor…</small><button id="access-button" class="text-button">Erişim anahtarı</button></div>
+  </aside>
+  <main>
+    <header class="topbar"><div><span class="muted">Çalışma alanım</span><span class="slash">/</span><span id="breadcrumb">Genel bakış</span></div><div class="top-right"><span id="connection">Bağlanıyor</span><span class="avatar">A</span></div></header>
+    <div class="content">
+      <div class="page-heading"><div><div class="eyebrow">AĞ GÖRÜNÜRLÜĞÜ, TEK NOKTADA</div><h1 id="page-title">Ağınıza yakından bakın.</h1><p id="page-description">Cihazlarınızı keşfedin, erişilebilirliği izleyin ve envanterinizi güncel tutun.</p></div><button id="scan-button" class="button primary"><span>⌕</span> Ağı tara</button></div>
+      <div id="notice" role="status" hidden></div>
+      <div id="scan-progress" class="scan-progress" hidden><span id="scan-label"></span><progress id="scan-bar" max="1" value="0"></progress></div>
+
+      <section id="overview-view" class="view">
+        <div class="stats">
+          <article class="stat"><div class="stat-label">Toplam cihaz <span class="stat-icon">▤</span></div><strong id="total">0</strong><small>Envantere kayıtlı cihaz</small></article>
+          <article class="stat"><div class="stat-label">Erişilebilir <span class="stat-icon green">↗</span></div><strong id="online">0</strong><small><span class="green-dot"></span> Son kontrolde yanıt verdi</small></article>
+          <article class="stat"><div class="stat-label">Kontrol gerekli <span class="stat-icon orange">!</span></div><strong id="issues">0</strong><small>Yanıt alınamayan cihaz</small></article>
+          <article class="stat"><div class="stat-label">İzlenen ağ <span class="stat-icon">⌘</span></div><strong id="networks">0</strong><small id="interval-label">5 dakikada bir kontrol</small></article>
+        </div>
+        <div class="overview-grid">
+          <article class="panel health-panel"><div class="panel-heading"><div><h2>Ağ durumu</h2><p>Son kontrol sonuçlarının dağılımı</p></div><span class="badge neutral">Canlı veriler</span></div><div class="health-body"><div class="donut" id="donut"><div><strong id="health-percent">—</strong><small>erişilebilir</small></div></div><div class="health-legend"><div><span class="legend-dot online"></span>Erişilebilir<strong id="legend-online">0</strong></div><div><span class="legend-dot degraded"></span>Kontrol gerekli<strong id="legend-issues">0</strong></div><div><span class="legend-dot unknown"></span>Henüz kontrol edilmedi<strong id="legend-unknown">0</strong></div></div></div><div class="panel-foot" id="last-scan">Henüz tarama yapılmadı.</div></article>
+          <article class="panel activity-panel"><div class="panel-heading"><div><h2>Son hareketler</h2><p>Ağınızdaki son durum değişiklikleri</p></div><button class="text-button" data-view="events">Tümünü gör ↗</button></div><div id="recent-events" class="activity-list"></div></article>
+        </div>
+      </section>
+
+      <section id="inventory-section" class="panel inventory-panel">
+        <div class="panel-heading"><div><h2>Cihaz envanteri <span class="count" id="device-count">0</span></h2><p>Ağınızdaki cihaz ve sunucuların merkezi kaydı</p></div><div class="actions"><button class="button" id="export-button">↓ CSV indir</button><button class="button" id="add-button">＋ Cihaz ekle</button></div></div>
+        <div class="filters"><label class="search"><span>⌕</span><input id="search" placeholder="Cihaz adı, IP, konum veya sorumlu ara…" aria-label="Cihaz ara"></label><select id="status-filter" aria-label="Durum filtresi"><option value="">Tüm durumlar</option><option value="online">Erişilebilir</option><option value="degraded">Geçici yanıt yok</option><option value="unreachable">Yanıt yok</option><option value="unknown">Kontrol edilmedi</option></select><select id="kind-filter" aria-label="Tür filtresi"><option value="">Tüm cihaz türleri</option><option>Sunucu</option><option>Switch</option><option>Router</option><option>Güvenlik duvarı</option><option>Yazıcı</option><option>İş istasyonu</option><option>Diğer</option></select></div>
+        <div class="table-scroll"><table><thead><tr><th>CİHAZ</th><th>IP ADRESİ</th><th>DURUM</th><th>TÜR / İŞLETİM SİSTEMİ</th><th>GECİKME</th><th>SON KONTROL</th><th></th></tr></thead><tbody id="device-rows"></tbody></table></div>
+        <div id="empty" class="empty"><div class="empty-icon">⌘</div><h3>Ağınızın haritası burada başlıyor.</h3><p>Ağ ayarlarından IP aralığınızı kaydedin ve ilk taramayı başlatın.<br>Cihazları envantere elle de ekleyebilirsiniz.</p><button class="button primary" data-view="settings">Ağ ayarlarını aç ↗</button></div>
+        <div class="panel-foot table-foot"><span id="visible-count">0 cihaz</span><span>TCP bağlantısı + varsa ICMP · 3 başarısız kontrolde uyarı</span></div>
+      </section>
+
+      <section id="events-view" class="view panel" hidden><div class="panel-heading"><div><h2>Olay geçmişi</h2><p>Yeni keşifler, erişim kesintileri ve yeniden erişilebilir olan cihazlar</p></div></div><div id="all-events" class="activity-list full"></div></section>
+      <section id="settings-view" class="view" hidden><div class="settings-grid"><article class="panel"><div class="panel-heading"><div><h2>Keşif ve izleme</h2><p>Yalnızca yönetiminizdeki ağları ekleyin.</p></div></div><form id="settings-form" class="form-body"><label>IP aralıkları · her satıra bir ağ<textarea id="ranges" rows="5" spellcheck="false" placeholder="192.168.10.0/23"></textarea></label><p class="help">192.168.10.0/23: 192.168.10.1–192.168.11.254 (510 adres). En fazla 8 özel IPv4 ağı, ağ başına 1024 adres.</p><label>Kontrol aralığı<select id="interval"><option value="60">Her dakika</option><option value="300">5 dakikada bir</option><option value="900">15 dakikada bir</option><option value="3600">Her saat</option><option value="86400">Her gün</option></select></label><button class="button primary" type="submit">Ayarları kaydet</button><p class="help">Kayıttan sonra düzenli izleme başlar. Ağ listesi boş olsa da envanterdeki cihazlar izlenir. Taramayı hemen başlatmak için “Ağı tara” düğmesini kullanın.</p></form></article><article class="panel info-panel"><span class="info-symbol">ⓘ</span><h2>İzleme nasıl çalışır?</h2><p>SSH, HTTP, HTTPS, SMB, RDP, VMware, Proxmox ve yazıcı portlarına bağlantı denenir. Sistemde <code>ping</code> varsa ICMP kontrolü de yapılır.</p><p>Üç ardışık kontrolde yanıt alınamazsa olay kaydı oluşur. Yanıt alınmaması cihazın kesin olarak kapalı olduğu anlamına gelmez; güvenlik duvarı da yanıtı engelleyebilir.</p><p>Tür, açık portlara göre tahmin edilir ve düzenlenebilir. Donanım, işletim sistemi ve sorumlu bilgileri elle girilir.</p><div class="info-note">İzleme motoru ilgili ağlara erişebilen bir bilgisayarda çalışmalıdır. Birden fazla ağ için yönlendirme veya VPN erişimi gerekir.</div></article></div></section>
+      <footer>AğAtlas <span>·</span> Ağ ve sunucu envanteri <span class="footer-right">Veriler kendi SQLite veritabanınızda saklanır.</span></footer>
+    </div>
+  </main>
+  <dialog id="device-dialog"><form id="device-form"><div class="dialog-heading"><div><div class="eyebrow">ENVANTER</div><h2 id="dialog-title">Cihaz ekle</h2></div><button type="button" class="close-button" data-close="device-dialog" aria-label="Kapat">×</button></div><div class="form-body"><div class="form-grid"><label>IP adresi<input name="ip" required placeholder="192.168.10.10" maxlength="15"></label><label>Cihaz adı<input name="name" maxlength="200" placeholder="Örn. Dosya sunucusu"></label><label>Cihaz türü<select name="kind"><option>Diğer</option><option>Sunucu</option><option>Switch</option><option>Router</option><option>Güvenlik duvarı</option><option>Yazıcı</option><option>İş istasyonu</option></select></label><label>İşletim sistemi<input name="os" maxlength="200" placeholder="Örn. Windows Server 2022"></label><label>İşlemci<input name="cpu" maxlength="200"></label><label>Bellek<input name="ram" maxlength="200" placeholder="Örn. 32 GB"></label><label>Model<input name="model" maxlength="200"></label><label>Seri numarası<input name="serial" maxlength="200"></label><label>Konum<input name="site" maxlength="200" placeholder="Örn. Merkez / Rack 02"></label><label>Sorumlu<input name="owner" maxlength="200"></label></div><label>Notlar<textarea name="notes" rows="3" maxlength="4000"></textarea></label><div id="device-details" hidden><h3>Son 60 kontrol</h3><div id="history" class="history"></div><p id="port-details" class="help"></p></div><p id="device-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="delete-button" class="button danger" type="button" hidden>Cihazı sil</button><button class="button primary" type="submit">Kaydet</button></div></div></form></dialog>
+  <dialog id="access-dialog"><form id="access-form"><div class="dialog-heading"><h2>Erişim anahtarı</h2><button type="button" class="close-button" data-close="access-dialog" aria-label="Kapat">×</button></div><div class="form-body"><p class="help">Sunucuda ATLAS_TOKEN ayarlıysa aynı anahtarı girin. Anahtar yalnızca bu sekmenin oturumunda saklanır.</p><label>Anahtar<input id="access-token" type="password" autocomplete="off"></label><button class="button primary" type="submit">Bağlan</button></div></form></dialog>
+</body>
+</html>

@@ -20,11 +20,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from snmp import identify
 
 ROOT = Path(__file__).resolve().parent
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
-PORTS = {22: 'SSH', 80: 'HTTP', 443: 'HTTPS / Aruba / VMware', 445: 'SMB', 3389: 'RDP', 902: 'VMware', 8006: 'Proxmox', 9100: 'Yazıcı', 631: 'IPP', 515: 'LPD', 8080: 'HTTP alternatif'}
-FIELDS = ('name', 'kind', 'os', 'cpu', 'ram', 'model', 'serial', 'site', 'owner', 'notes')
+PORTS = {22: 'SSH', 80: 'HTTP', 443: 'HTTPS / Aruba / VMware', 445: 'SMB', 3389: 'RDP', 5900: 'VNC', 5901: 'VNC :1', 5902: 'VNC :2', 902: 'VMware', 8006: 'Proxmox', 9100: 'Yazıcı', 631: 'IPP', 515: 'LPD', 8080: 'HTTP alternatif'}
+FIELDS = ('name', 'kind', 'os', 'cpu', 'ram', 'model', 'serial', 'site', 'owner', 'notes', 'ssh_user')
+IDENTITY_COLUMNS = {'detected_model': "TEXT NOT NULL DEFAULT ''", 'detected_serial': "TEXT NOT NULL DEFAULT ''",
+                    'detected_name': "TEXT NOT NULL DEFAULT ''", 'manufacturer': "TEXT NOT NULL DEFAULT ''",
+                    'sys_description': "TEXT NOT NULL DEFAULT ''", 'sys_object_id': "TEXT NOT NULL DEFAULT ''",
+                    'model_source': "TEXT NOT NULL DEFAULT ''", 'snmp_checked_at': 'TEXT',
+                    'snmp_status': "TEXT NOT NULL DEFAULT 'not_configured'", 'agent_uptime': 'INTEGER',
+                    'ssh_user': "TEXT NOT NULL DEFAULT ''"}
 
 
 def now():
@@ -48,6 +55,42 @@ def ip_value(value):
     if net.prefixlen != 32:
         raise ValueError('Tek bir IPv4 adresi girin.')
     return str(net.network_address)
+
+
+def group_for_ip(ip, ranges):
+    address = ipaddress.ip_address(ip)
+    matches = [network(r) for r in ranges if address in network(r)]
+    return str(max(matches, key=lambda n: n.prefixlen)) if matches else 'Diğer ağlar'
+
+
+def network_groups(devices, ranges):
+    groups = {cidr: {'network': cidr, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0} for cidr in ranges}
+    for device in devices:
+        name = device['network']
+        group = groups.setdefault(name, {'network': name, 'total': 0, 'online': 0, 'unreachable': 0, 'degraded': 0, 'unknown': 0, 'stale': 0})
+        group['total'] += 1
+        group[device['effective_status']] += 1
+    return list(groups.values())
+
+
+def connection_file(device, protocol):
+    ip = ip_value(device['ip'])
+    ports = device['ports']
+    if protocol == 'rdp' and 3389 in ports:
+        content = f'full address:s:{ip}:3389\r\nprompt for credentials:i:1\r\nauthentication level:i:2\r\nscreen mode id:i:2\r\n'
+        return content.encode('utf-8'), f'{ip}.rdp'
+    if protocol == 'ssh' and 22 in ports:
+        user = device.get('ssh_user', '')
+        if any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@\\' for c in user):
+            raise ValueError('Geçersiz SSH kullanıcı adı.')
+        login = f'-l "{user}" ' if user else ''
+        content = f'@echo off\r\nssh {login}{ip}\r\npause\r\n'
+        return content.encode('ascii'), f'SSH-{ip}.cmd'
+    if protocol == 'vnc':
+        port = next((p for p in (5900, 5901, 5902) if p in ports), None)
+        if port:
+            return f'[connection]\r\nhost={ip}\r\nport={port}\r\n'.encode('ascii'), f'{ip}.vnc'
+    raise RuntimeError('Bu servisin portu son kontrolde açık bulunamadı.')
 
 
 class Store:
@@ -78,6 +121,13 @@ class Store:
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             ''')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)', ('monitor', json.dumps({'ranges': [], 'interval': 300})))
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(devices)')}
+            for name, definition in IDENTITY_COLUMNS.items():
+                if name not in columns:
+                    db.execute(f'ALTER TABLE devices ADD COLUMN {name} {definition}')
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)', ('snmp', json.dumps({'enabled': False, 'version': '2c', 'community': ''})))
+        if os.name != 'nt':
+            os.chmod(self.path, 0o600)
 
     @contextmanager
     def db(self):
@@ -96,13 +146,31 @@ class Store:
     def devices(self):
         with self.db() as db:
             rows = [dict(r) for r in db.execute('SELECT * FROM devices')]
+        settings = self.settings()
         for row in rows:
             row['ports'] = json.loads(row['ports'])
+            row['display_name'] = row['name'] or row['detected_name'] or 'Adsız cihaz'
+            row['display_model'] = row['model'] or row['detected_model']
+            row['display_serial'] = row['serial'] or row['detected_serial']
+            row['display_model_source'] = 'Elle girildi' if row['model'] else row['model_source']
+            row['network'] = group_for_ip(row['ip'], settings['ranges'])
+            row['effective_status'] = row['status']
+            if row['last_checked']:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(row['last_checked'])).total_seconds()
+                if age > settings['interval'] * 2 + 60:
+                    row['effective_status'] = 'stale'
         return sorted(rows, key=lambda d: ipaddress.ip_address(d['ip']))
 
     def settings(self):
         with self.db() as db:
-            return json.loads(db.execute("SELECT value FROM settings WHERE key='monitor'").fetchone()[0])
+            settings = json.loads(db.execute("SELECT value FROM settings WHERE key='monitor'").fetchone()[0])
+        snmp = self.snmp_settings()
+        settings.update(snmp_enabled=snmp['enabled'], snmp_version=snmp['version'], snmp_configured=bool(snmp['community']))
+        return settings
+
+    def snmp_settings(self):
+        with self.db() as db:
+            return json.loads(db.execute("SELECT value FROM settings WHERE key='snmp'").fetchone()[0])
 
     def save_settings(self, data):
         ranges = data.get('ranges', [])
@@ -113,9 +181,24 @@ class Store:
         if isinstance(interval, bool) or not isinstance(interval, int) or not 60 <= interval <= 86400:
             raise ValueError('Kontrol aralığı 60–86400 saniye olmalıdır.')
         settings = {'ranges': ranges, 'interval': interval}
+        snmp = self.snmp_settings()
+        enabled, version = data.get('snmp_enabled', snmp['enabled']), data.get('snmp_version', snmp['version'])
+        if not isinstance(enabled, bool) or version not in ('1', '2c'):
+            raise ValueError('SNMP sürümü 1 veya 2c olmalıdır.')
+        community = data.get('snmp_community', '')
+        if not isinstance(community, str) or len(community.encode('utf-8')) > 255:
+            raise ValueError('SNMP community en fazla 255 bayt olmalıdır.')
+        if data.get('snmp_clear') is True:
+            snmp['community'] = ''
+        elif community:
+            snmp['community'] = community
+        if enabled and not snmp['community']:
+            raise ValueError('SNMP için cihazlarda tanımlı salt okunur community değerini girin.')
+        snmp.update(enabled=enabled, version=version)
         with self.db() as db:
             db.execute("UPDATE settings SET value=? WHERE key='monitor'", (json.dumps(settings),))
-        return settings
+            db.execute("UPDATE settings SET value=? WHERE key='snmp'", (json.dumps(snmp),))
+        return self.settings()
 
     def save_device(self, data, device_id=None):
         clean = {}
@@ -124,6 +207,8 @@ class Store:
             if not isinstance(value, str) or len(value) > (4000 if key == 'notes' else 200):
                 raise ValueError(f'{key}: metin çok uzun veya geçersiz.')
             clean[key] = value.strip()
+        if any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@\\' for c in clean['ssh_user']) or len(clean['ssh_user']) > 64:
+            raise ValueError('SSH kullanıcı adı yalnızca harf, rakam, nokta, tire, alt çizgi, @ ve ters eğik çizgi içerebilir (en fazla 64 karakter).')
         ip = ip_value(data.get('ip', ''))
         with self.db() as db:
             if device_id is None:
@@ -166,6 +251,15 @@ class Store:
             stamp, ports = now(), json.dumps(result['ports'])
             db.execute('''UPDATE devices SET status=?,latency=?,ports=?,last_checked=?,last_seen=?,failures=? WHERE id=?''',
                        (status, result['latency'], ports, stamp, stamp if reachable else old['last_seen'], failures, old['id']))
+            snmp = result.get('snmp')
+            if snmp:
+                db.execute('UPDATE devices SET snmp_status=? WHERE id=?', (snmp['status'], old['id']))
+                if snmp['status'] == 'ok':
+                    db.execute('''UPDATE devices SET detected_name=?,sys_description=?,sys_object_id=?,agent_uptime=?,snmp_checked_at=? WHERE id=?''',
+                               (snmp.get('name', ''), snmp.get('description', ''), snmp.get('object_id', ''), snmp.get('uptime'), stamp, old['id']))
+                    if snmp.get('model'):
+                        db.execute('''UPDATE devices SET detected_model=?,detected_serial=?,manufacturer=?,model_source=? WHERE id=?''',
+                                   (snmp['model'], snmp.get('serial', ''), snmp.get('manufacturer', ''), snmp.get('source', ''), old['id']))
             db.execute('INSERT INTO checks(device_id,checked_at,reachable,latency,ports) VALUES (?,?,?,?,?)',
                        (old['id'], stamp, int(reachable), result['latency'], ports))
             # Keep the most recent 500 checks per device and 2000 global events.
@@ -183,8 +277,8 @@ class Store:
             return [dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')]
 
 
-def probe(ip, ports=PORTS, timeout=0.35):
-    """Only connection handshakes and optional ICMP; no login or banner collection."""
+def probe(ip, ports=PORTS, timeout=0.35, snmp_config=None):
+    """Connection handshakes, optional ICMP and configured read-only SNMP."""
     opened, latencies = [], []
     for port in ports:
         start = time.monotonic()
@@ -210,11 +304,15 @@ def probe(ip, ports=PORTS, timeout=0.35):
         except (OSError, subprocess.TimeoutExpired):
             pass
     kind = 'Yazıcı' if any(p in opened for p in (9100, 631, 515)) else 'Sunucu' if any(p in opened for p in (22, 445, 3389, 902, 8006)) else 'Diğer'
-    return {'ip': ip, 'reachable': bool(opened) or icmp, 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind}
+    snmp_start = time.monotonic()
+    snmp = identify(ip, snmp_config or {})
+    if snmp['status'] == 'ok' and not latencies:
+        latencies.append(snmp.get('latency', (time.monotonic() - snmp_start) * 1000))
+    return {'ip': ip, 'reachable': bool(opened) or icmp or snmp['status'] == 'ok', 'latency': round(min(latencies), 2) if latencies else None, 'ports': opened, 'kind': kind, 'snmp': snmp}
 
 
 class Monitor:
-    def __init__(self, store, probe_fn=probe):
+    def __init__(self, store, probe_fn=None):
         self.store, self.probe = store, probe_fn
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -246,8 +344,9 @@ class Monitor:
 
     def run(self, targets):
         try:
+            config = self.store.snmp_settings()
             with ThreadPoolExecutor(max_workers=32) as pool:
-                pending = {pool.submit(self.probe, ip) for ip in targets}
+                pending = {pool.submit(self.probe, ip) if self.probe else pool.submit(probe, ip, snmp_config=config) for ip in targets}
                 for future in as_completed(pending):
                     if self.stop.is_set():
                         for task in pending:
@@ -279,7 +378,7 @@ class Monitor:
 def csv_export(devices):
     output = io.StringIO(newline='')
     writer = csv.writer(output)
-    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked')
+    columns = ('ip', *FIELDS, 'status', 'latency', 'last_seen', 'last_checked', 'network', 'display_model', 'display_serial', 'display_model_source', 'snmp_status')
     writer.writerow(columns)
     for device in devices:
         values = []
@@ -304,7 +403,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def send(self, status, payload, content_type='application/json; charset=utf-8'):
+    def send(self, status, payload, content_type='application/json; charset=utf-8', filename=None):
         body = json.dumps(payload, ensure_ascii=False).encode() if not isinstance(payload, bytes) else payload
         self.send_response(status)
         self.send_header('Content-Type', content_type)
@@ -313,7 +412,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-        if self.path == '/api/export':
+        if filename:
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        elif self.path == '/api/export':
             self.send_header('Content-Disposition', 'attachment; filename="ag-atlas-envanter.csv"')
         self.end_headers()
         self.wfile.write(body)
@@ -355,15 +456,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(401, {'error': 'Erişim anahtarı gerekli veya geçersiz sunucu adresi.'})
         store = self.server.store
         if self.command == 'GET' and path == '/api/state':
-            return self.send(200, {'devices': store.devices(), 'events': store.events(), 'settings': store.settings(),
+            devices, settings = store.devices(), store.settings()
+            return self.send(200, {'devices': devices, 'groups': network_groups(devices, settings['ranges']), 'events': store.events(), 'settings': settings,
                                    'scan': self.server.monitor.snapshot(), 'capabilities': {'icmp': bool(shutil.which('ping')), 'ports': PORTS}, 'server_time': now()})
         if self.command == 'GET' and path == '/api/export':
             return self.send(200, csv_export(store.devices()), 'text/csv; charset=utf-8')
         if path.startswith('/api/devices/'):
             parts = path.strip('/').split('/')
-            if len(parts) not in (3, 4) or not parts[2].isdigit():
+            if len(parts) not in (3, 4, 5) or not parts[2].isdigit():
                 raise LookupError('Sayfa bulunamadı.')
             device_id = int(parts[2])
+            if self.command == 'GET' and len(parts) == 5 and parts[3] == 'connect' and parts[4] in ('ssh', 'rdp', 'vnc'):
+                device = next((d for d in store.devices() if d['id'] == device_id), None)
+                if not device:
+                    raise LookupError('Cihaz bulunamadı.')
+                if device['effective_status'] != 'online':
+                    raise RuntimeError('Bağlantı için önce cihazın güncel Online durumunu taramayla doğrulayın.')
+                content, filename = connection_file(device, parts[4])
+                return self.send(200, content, 'application/octet-stream', filename=filename)
             if self.command == 'GET' and len(parts) == 4 and parts[3] == 'history':
                 return self.send(200, store.history(device_id))
             if len(parts) == 3:

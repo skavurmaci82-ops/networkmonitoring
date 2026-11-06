@@ -12,7 +12,9 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         store = Store(Path(directory) / 'browser.sqlite3')
         server = Server(('127.0.0.1', 0), store)
-        server.monitor.probe = lambda ip: {'ip': ip, 'reachable': True, 'ports': [22, 443], 'latency': 2.1, 'kind': 'Sunucu'}
+        server.monitor.probe = lambda ip: {'ip': ip, 'reachable': True, 'ports': [22, 443, 3389, 5900], 'latency': 2.1, 'kind': 'Sunucu',
+            'snmp': {'status': 'ok', 'model': 'Aruba 2930F', 'manufacturer': 'Aruba', 'serial': 'TEST-123', 'name': 'test-switch',
+                     'description': 'Synthetic SNMP test fixture', 'source': 'SNMP ENTITY-MIB (chassis)', 'uptime': 3600}}
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
@@ -30,11 +32,15 @@ def main():
                 assert page.locator('#total').inner_text() == '0'
                 page.locator('.nav-item[data-view=settings]').click()
                 assert page.locator('#ranges').input_value().splitlines() == ['192.168.10.0/23', '192.168.100.0/23', '192.168.24.0/24', '192.168.25.0/24']
+                page.locator('#snmp-enabled').check()
+                page.locator('#snmp-community').fill('local-browser-test')
                 page.locator('#settings-form button[type=submit]').click()
                 page.wait_for_function("() => document.querySelector('#networks').textContent==='4'")
-                page.locator('#ranges').fill('192.168.10.12/32')
+                assert page.locator('#snmp-community').input_value() == ''
+                assert store.snmp_settings()['community'] == 'local-browser-test'
+                page.locator('#ranges').fill('192.168.10.12/32\n192.168.100.13/32')
                 page.locator('#settings-form button[type=submit]').click()
-                page.wait_for_function("() => document.querySelector('#networks').textContent==='1'")
+                page.wait_for_function("() => document.querySelector('#networks').textContent==='2'")
                 page.locator('.nav-item[data-view=inventory]').click()
                 page.locator('#add-button').click()
                 page.locator('[name=ip]').fill('192.168.10.12')
@@ -43,15 +49,19 @@ def main():
                 page.locator('[name=os]').fill('Ubuntu 24.04')
                 page.locator('[name=site]').fill('İstanbul')
                 page.locator('[name=ram]').fill('64 GB')
+                page.locator('[name=ssh_user]').fill('admin')
                 page.locator('#device-form button[type=submit]').click()
                 page.wait_for_function("() => document.querySelector('#total').textContent==='1'")
                 assert page.locator('#device-rows b').count() == 0, 'Inventory must escape HTML'
                 page.locator('#scan-button').click()
-                page.wait_for_function("() => document.querySelector('#online').textContent==='1'")
+                page.wait_for_function("() => document.querySelector('#online').textContent==='2'")
+                assert page.locator('.device-row').count() == 2
+                assert page.locator('.network-row').count() == 2
+                assert page.locator('#device-rows').inner_text().count('Aruba 2930F') == 2
                 page.locator('#search').fill('bulunamayan')
                 assert page.locator('#device-rows tr').count() == 0
                 page.locator('#search').fill('İstanbul')
-                assert page.locator('#device-rows tr').count() == 1
+                assert page.locator('#device-rows .device-row').count() == 1
                 page.locator('.row-edit').click()
                 page.wait_for_selector('#history i')
                 assert page.locator('[name=ram]').input_value() == '64 GB'
@@ -62,21 +72,28 @@ def main():
                     page.locator('#export-button').click()
                 downloaded = download.value
                 assert 'BT Ekibi' in Path(downloaded.path()).read_text(encoding='utf-8-sig')
+                for protocol, expected in [('rdp', 'full address:s:192.168.10.12:3389'), ('ssh', 'ssh -l "admin" 192.168.10.12'), ('vnc', 'port=5900')]:
+                    with page.expect_download() as download:
+                        page.locator(f'[data-connect={protocol}]').click()
+                    assert expected in Path(download.value.path()).read_text()
+                page.locator('#search').fill('')
                 page.locator('.nav-item[data-view=overview]').click()
-                assert page.locator('#health-percent').inner_text() == '100%'
-                assert page.locator('#donut').evaluate("el=>getComputedStyle(el).backgroundImage").startswith('conic-gradient')
+                page.locator('[data-network="192.168.10.12/32"]').click()
+                assert page.locator('.device-row').count() == 1
+                page.locator('#all-networks').click()
+                assert page.locator('.device-row').count() == 2
                 if os.environ.get('ATLAS_SCREENSHOT'):
                     page.screenshot(path=os.environ['ATLAS_SCREENSHOT'], full_page=True)
                 page.set_viewport_size({'width': 390, 'height': 844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Mobile layout overflows'
                 page.locator('.nav-item[data-view=inventory]').click()
-                page.locator('.row-edit').click()
+                page.locator('.row-edit').first.click()
                 page.on('dialog', lambda dialog: dialog.accept())
                 page.locator('#delete-button').click()
-                page.wait_for_function("() => document.querySelector('#total').textContent==='0'")
+                page.wait_for_function("() => document.querySelector('#total').textContent==='1'")
                 assert not errors, errors
                 browser.close()
-                print('PASS: real-browser settings, inventory, scan, filters, history, CSV, escaping, mobile layout, deletion; no browser errors')
+                print('PASS: real-browser SNMP settings, model display, network groups, SSH/RDP/VNC downloads, inventory, history, CSV, escaping, mobile layout; no browser errors')
         finally:
             server.shutdown()
             server.monitor.stop.set()
